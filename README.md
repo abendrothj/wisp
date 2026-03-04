@@ -1,218 +1,260 @@
-# wisp
+# wisp v1.0
 
 Author: Jake Abendroth
 
-Tailscale-native, agentless infrastructure control plane.
+Tailscale-native, agentless infrastructure control plane for Docker operations + optional Azure DB telemetry.
 
-`wisp` defaults to Tailscale SSH (recommended), polls Docker + optional Azure DB telemetry, and renders:
-- a local TUI dashboard
-- a local web dashboard (`http://127.0.0.1:8080` by default)
+`wisp` gives you a fast local control surface with no remote agents and no management stack to babysit:
+- Terminal UI (primary operator workflow)
+- Local web dashboard at `http://127.0.0.1:8080` (default)
 
-## Inspiration
+## Why wisp
 
-This project started with a very specific, very real problem:
+`wisp` is built for one job: make common infra actions instant, secure, and low-friction.
 
-"I want container management and telemetry, but I do **not** want to babysit another heavyweight control-plane app just to click Restart."
-
-Portainer is powerful, but for this environment it felt like bringing a cruise ship to cross a puddle.
-
-So `wisp` is the opposite philosophy:
-- no agent to install
-- no always-on management stack to maintain
-- no giant UI framework tax
-- just direct, secure control over the boxes you already run
+- No daemon on target hosts
+- No always-on control plane
+- Tailscale-first transport model
+- Practical fallback to native `ssh` when needed
 
 In short: less dashboard theater, more useful buttons.
 
-## What it shows
+## v1.0 highlights
 
-### Docker
-- Container name, state, status
-- CPU %, memory usage
-- Network I/O (`docker stats` `NetIO`)
-- On-demand actions:
-  - Start container
-  - Stop container
-  - Restart container
-  - Inspect container (`docker inspect <name>`)
-  - View logs (`docker logs -n 50 <name>`)
-  - Disk usage (`docker system df`)
-  - Guarded prune of stopped containers (`docker container prune -f`)
+- Concurrent architecture using snapshot broadcasting + action channels for responsive UI under remote latency
+- Full container action path in both TUI and web: start, stop, restart, inspect, logs, disk usage, guarded prune
+- Optional Azure DB metrics panel (PostgreSQL Flexible + MySQL Flexible)
+- Embedded static web dashboard and websocket live updates
+- Configurable TUI theming via `wisp.toml` / global config
 
-Interactive shells are intentionally out of scope for `wisp` reliability; use direct SSH when you need a shell session.
+## What wisp shows
 
-These actions are available in both TUI and web dashboard.
+### Docker telemetry
 
-### Azure DB (optional)
-For Azure Database for PostgreSQL Flexible Server or MySQL Flexible Server:
-- DB server name
-- DB type (PostgreSQL Flexible / MySQL)
-- CPU %
-- Memory %
-- Storage %
-- `ACT CONN` (active connections)
+- Container name, state, health, and status
+- CPU %, memory usage, network I/O
+- Real-time table updates
 
-`ACT CONN` comes from Azure Monitor metric `active_connections`.
+### Azure telemetry (optional)
+
+- DB name and type
+- CPU %, memory %, storage %
+- `ACT CONN` from Azure Monitor `active_connections`
+
+## Supported actions
+
+Actions execute on the remote host through the selected transport.
+
+- Start: `docker start <name>`
+- Stop: `docker stop <name>`
+- Restart: `docker restart <name>`
+- Inspect: `docker inspect <name>`
+- Logs: `docker logs -n 50 <name>`
+- Disk usage: `docker system df`
+- Guarded prune (stopped containers): `docker container prune -f`
+
+Interactive shell sessions are intentionally out of scope for reliability. Use direct SSH when shell access is needed.
 
 ## Requirements
 
-- Rust toolchain (edition 2024 project)
-- Docker installed on target host
-- Transport requirements (choose one):
-  - Tailscale mode (default): Tailscale with SSH enabled between your machine and target host
-  - SSH mode (`--ssh`): OpenSSH client (`ssh`) and reachable SSH service on target host
-- `tailscale` CLI if using Tailscale mode
+- Rust toolchain (edition 2024)
+- Docker on the target host
+- One transport mode:
+  - **Default (recommended):** Tailscale SSH
+  - **Fallback:** standard OpenSSH via `--ssh`
+- `tailscale` CLI when using Tailscale mode
 - Optional Azure monitoring:
-  - Azure CLI (`az`) installed and logged in, or `AZURE_ACCESS_TOKEN`
+  - Azure CLI (`az`) logged in, or
+  - `AZURE_ACCESS_TOKEN` environment variable
 
-## Install from zero
+## Quickstart
 
-### 0) Install Rust
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
-```
-
-### 1) Clone
+### 1) Clone and build
 
 ```bash
 git clone <your-repo-url>
 cd wisp
+cargo build
 ```
 
-### 2) Set up Tailscale
-
-Follow official docs:
-- https://tailscale.com/download
-- https://tailscale.com/kb/1193/tailscale-ssh
-
-### 3) Build + run
+### 2) Run with Tailscale (default)
 
 ```bash
-cargo build
 cargo run -- -H <tailscale-ip> -u <user>
 ```
 
-### 4) Install to PATH (optional)
+### 3) Open web dashboard (optional)
 
-```bash
-cargo install --path .
-wisp --version
-```
+By default: `http://127.0.0.1:8080`
 
-If `wisp` is not found, ensure Cargo bin dir is on your PATH:
+## Transport modes
 
-```bash
-export PATH="$HOME/.cargo/bin:$PATH"
-```
+### Tailscale mode (default)
 
-## Alternative: SSH mode
+- Preferred security posture
+- Uses `tailscale ssh`
 
-Use when you explicitly do not want Tailscale transport:
+### SSH mode (`--ssh`)
 
 ```bash
 cargo run -- --ssh -H <host> -u <user> [-p <port>]
 ```
 
-⚠ `--ssh` is less safe by default because it often implies opening SSH ports.
-- Keep SSH ports closed to public internet.
-- Prefer Tailscale mode when possible.
-- If SSH is required, restrict ingress aggressively (CIDRs/firewall/bastion).
+Use only when Tailscale is not available.
 
-## Build
-
-```bash
-cargo build
-```
-
-## Run
-
-```bash
-cargo run -- -H <tailscale-ip>
-```
-
-Optional flags:
-- `-p, --port <port>`: SSH port (default 22)
-- `-u, --user <user>`: SSH user (default from config)
-- `-i, --interval <seconds>`: Docker poll interval
-- `--web-port <port>`: local web dashboard port (default 8080)
-- `--ssh`: use standard SSH transport instead of Tailscale SSH
+- Keep SSH closed to the public internet
+- Restrict ingress with firewall/CIDR/bastion controls
 
 ## Setup wizard (Azure)
 
-Interactive auto-discovery via Azure CLI:
+Use the guided setup to discover subscription + DB server and save config:
 
 ```bash
 cargo run -- --setup
 ```
 
-Writes config to:
+Global config path:
 - `~/.config/wisp/config.toml`
 
-Project-local `wisp.toml` is also supported and takes priority when present.
+Project-local config path (takes priority when present):
+- `./wisp.toml`
 
-Host transport can also be set in config:
+## Configuration
+
+### Minimal example
 
 ```toml
 [host]
+address = "100.64.0.10"
+port = 22
+user = "deploy"
+interval = 5
 transport = "tailscale" # or "ssh"
+
+[web]
+port = 8080
 ```
+
+### Optional Azure section
+
+```toml
+[azure]
+subscription_id = "<sub-id>"
+resource_group = "<rg>"
+db_server = "<server-name>"
+db_type = "postgresql-flexible" # or "mysql"
+```
+
+### Optional TUI theme section
+
+Theme values support named colors (`red`, `cyan`, `darkgray`, etc.) or hex (`#RRGGBB`).
+
+```toml
+[theme]
+accent = "cyan"
+border = "blue"
+muted = "darkgray"
+text = "white"
+success = "green"
+warning = "yellow"
+danger = "red"
+panel = "black"
+selection_fg = "black"
+selection_bg = "cyan"
+```
+
+## CLI flags
+
+- `-H, --host <host>`: target host (required unless config provides one)
+- `-p, --port <port>`: SSH port (default `22`)
+- `-u, --user <user>`: remote user (default from config)
+- `-i, --interval <seconds>`: Docker poll interval
+- `--web-port <port>`: local web dashboard port (default `8080`)
+- `--ssh`: force standard SSH transport
+- `--setup`: launch Azure setup wizard
 
 ## TUI controls
 
-Global:
+### Global
+
 - `q` / `Ctrl+C`: quit
 - `j/k` or `↑/↓`: move selection
 
-Container actions:
-- `a`: start selected container
-- `x`: stop selected container
-- `r`: restart selected container
-- `Enter`: inspect selected container (`docker inspect <name>`)
-- `l`: open log viewer for selected container (last 50 lines)
-- `d`: open Docker disk usage (`docker system df`)
-- `p` then `p` (within 5s): guarded prune of stopped containers
+### Container actions
 
-Popup controls:
+- `a`: start
+- `x`: stop
+- `r`: restart
+- `Enter`: inspect
+- `l`: logs (last 50 lines)
+- `d`: docker disk usage
+- `p` then `p` within 5s: guarded prune
+
+### Popup controls
+
 - `Esc` / `Enter` / `q`: close popup
-- `j/k` or `↑/↓`: scroll 1 line
-- `PgUp` / `PgDn`: scroll by page chunk
+- `j/k` or `↑/↓`: scroll line
+- `PgUp` / `PgDn`: scroll chunk
 - `Home` / `End`: jump to top/bottom
 - Mouse wheel: scroll
 
 ## Web controls
 
-- `disk usage` button: runs `docker system df`
-- `prune stopped` button (with confirm): runs `docker container prune -f`
-- Per-container `start` button: runs `docker start <name>`
-- Per-container `stop` button: runs `docker stop <name>`
-- Per-container `inspect` button: runs `docker inspect <name>`
-- Per-container `logs` button: runs `docker logs -n 50 <name>`
-- Per-container `restart` button: runs `docker restart <name>`
-- Action output opens in a modal pane with scroll
+Web action parity with TUI includes:
 
-## Logging behavior
+- `disk usage`
+- `prune stopped` (with confirmation)
+- per-container `start`, `stop`, `restart`, `inspect`, `logs`
+- modal action output view
 
-Runtime logs are disabled by default to keep the TUI clean.
+## Logging
 
-To enable debug logs explicitly:
+Runtime logging is off by default to keep the UI clean.
+
+Enable debug logs:
 
 ```bash
 RUST_LOG=wisp=debug cargo run -- -H <tailscale-ip>
 ```
 
-## Architecture (high level)
+## Architecture
 
-- `src/main.rs`: runtime wiring, channels, poll loop, TUI/web launch
-- `src/ssh.rs`: Tailscale SSH session and remote command execution
-- `src/telemetry/docker.rs`: Docker JSON parsing models
-- `src/telemetry/azure.rs`: Azure Monitor metric fetch + token flow
-- `src/tui/`: terminal UI rendering + input handling
-- `src/web/`: Axum router + websocket snapshot stream
+- `src/main.rs`: runtime orchestration, polling loop, action worker, TUI/web startup
+- `src/ssh.rs`: remote command execution over Tailscale SSH or native SSH
+- `src/telemetry/docker.rs`: Docker parsing and models
+- `src/telemetry/azure.rs`: Azure metric collection + token handling
+- `src/tui/`: ratatui rendering and input handling
+- `src/web/`: axum routes, action handlers, websocket snapshot stream
 
-## Notes
+## Security notes
 
-- Commands execute on the remote host over SSH.
-- Log output is normalized for TUI display (`\r` converted to newlines).
-- If Azure is not configured, Docker telemetry still works fully.
+- Tailscale-first is the default and recommended deployment model
+- Web UI binds to localhost by default (`127.0.0.1`)
+- Action endpoints require an internal action header for browser-side requests
+- Remote commands run only through explicit operator actions
+
+## Roadmap
+
+### Saved + configurable servers
+
+Goal: manage multiple environments without rewriting flags each run.
+
+Planned:
+- Named server profiles in config (for example: `prod`, `staging`, `dev`)
+- Per-profile host/user/port/transport/interval/web-port/theme overrides
+- Simple profile selection at launch
+- Safe defaults with explicit profile activation
+
+### One-command TUI entry
+
+Goal: jump straight into operations with one command.
+
+Planned:
+- Launch TUI with a single profile-aware command (for example: `wisp up prod`)
+- Automatic profile resolution from config when no explicit flags are provided
+- Optional first-run bootstrap flow to create initial profile
+- Keep advanced flags available, but make them optional for daily use
+
+## License
+
+Add your project license here (for example: MIT).

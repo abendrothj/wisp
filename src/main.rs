@@ -96,6 +96,7 @@ struct Resolved {
     web_port: u16,
     azure:    Option<azure::AzureConfig>,
     transport: ssh::Transport,
+    theme: config::ThemeSection,
 }
 
 struct PollLoopConfig {
@@ -134,7 +135,7 @@ impl Resolved {
             file.azure_config().or_else(azure::AzureConfig::from_env)
         };
 
-        Ok(Self { host, port, user, interval, web_port, azure, transport })
+        Ok(Self { host, port, user, interval, web_port, azure, transport, theme: file.theme })
     }
 }
 
@@ -230,7 +231,7 @@ async fn main() -> Result<()> {
     }
 
     // ── TUI (blocks; tokio keeps polling + web tasks alive) ──────────────────
-    tokio::task::block_in_place(|| tui::run(&cfg.host, snap_rx, action_tx))?;
+    tokio::task::block_in_place(|| tui::run(&cfg.host, snap_rx, action_tx, cfg.theme.clone()))?;
 
     Ok(())
 }

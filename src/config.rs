@@ -13,6 +13,8 @@ pub struct Config {
     pub azure: Option<AzureSection>,
     #[serde(default)]
     pub web: WebSection,
+    #[serde(default)]
+    pub theme: ThemeSection,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -57,6 +59,37 @@ pub struct WebSection {
 
 impl Default for WebSection {
     fn default() -> Self { Self { port: 8080 } }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ThemeSection {
+    pub accent: String,
+    pub border: String,
+    pub muted: String,
+    pub text: String,
+    pub success: String,
+    pub warning: String,
+    pub danger: String,
+    pub panel: String,
+    pub selection_fg: String,
+    pub selection_bg: String,
+}
+
+impl Default for ThemeSection {
+    fn default() -> Self {
+        Self {
+            accent: "cyan".into(),
+            border: "blue".into(),
+            muted: "darkgray".into(),
+            text: "white".into(),
+            success: "green".into(),
+            warning: "yellow".into(),
+            danger: "red".into(),
+            panel: "black".into(),
+            selection_fg: "black".into(),
+            selection_bg: "cyan".into(),
+        }
+    }
 }
 
 // ── load / save ───────────────────────────────────────────────────────────────

@@ -14,6 +14,7 @@ use std::{
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::telemetry::Snapshot;
+use crate::config::ThemeSection;
 use crate::{RemoteAction, RemoteActionRequest, RemoteActionResult};
 
 /// How long without a fresh snapshot before we show "reconnecting…"
@@ -107,6 +108,7 @@ pub fn run(
     host: &str,
     mut rx: watch::Receiver<Option<Snapshot>>,
     action_tx: mpsc::Sender<RemoteActionRequest>,
+    theme_cfg: ThemeSection,
 ) -> Result<()> {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -117,12 +119,14 @@ pub fn run(
     setup_terminal()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut app = App::new();
+    let theme = ui::Theme::from_config(&theme_cfg);
     app.table_state.select(Some(0));
 
     let result = run_loop(
         &mut terminal,
         &mut app,
         host,
+        &theme,
         &mut rx,
         &action_tx,
     );
@@ -135,6 +139,7 @@ fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
     host: &str,
+    theme: &ui::Theme,
     rx: &mut watch::Receiver<Option<Snapshot>>,
     action_tx: &mpsc::Sender<RemoteActionRequest>,
 ) -> Result<()> {
@@ -212,7 +217,7 @@ fn run_loop(
             }
         }
 
-        terminal.draw(|frame| ui::draw(frame, app, host))?;
+        terminal.draw(|frame| ui::draw(frame, app, host, theme))?;
 
         if event::poll(tick)? {
             match event::read()? {

@@ -9,7 +9,68 @@ use ratatui::{
 use super::{App, Popup};
 use crate::telemetry::{azure::DbMetrics, docker::{ContainerInfo, ContainerStats}};
 
-pub fn draw(frame: &mut Frame, app: &mut App, host: &str) {
+#[derive(Debug, Clone)]
+pub struct Theme {
+    pub accent: Color,
+    pub border: Color,
+    pub muted: Color,
+    pub text: Color,
+    pub success: Color,
+    pub warning: Color,
+    pub danger: Color,
+    pub panel: Color,
+    pub selection_fg: Color,
+    pub selection_bg: Color,
+}
+
+impl Theme {
+    pub fn from_config(cfg: &crate::config::ThemeSection) -> Self {
+        Self {
+            accent: parse_color(&cfg.accent, Color::Cyan),
+            border: parse_color(&cfg.border, Color::Blue),
+            muted: parse_color(&cfg.muted, Color::DarkGray),
+            text: parse_color(&cfg.text, Color::White),
+            success: parse_color(&cfg.success, Color::Green),
+            warning: parse_color(&cfg.warning, Color::Yellow),
+            danger: parse_color(&cfg.danger, Color::Red),
+            panel: parse_color(&cfg.panel, Color::Black),
+            selection_fg: parse_color(&cfg.selection_fg, Color::Black),
+            selection_bg: parse_color(&cfg.selection_bg, Color::Cyan),
+        }
+    }
+}
+
+fn parse_color(value: &str, fallback: Color) -> Color {
+    let raw = value.trim();
+    if let Some(hex) = raw.strip_prefix('#')
+        && hex.len() == 6
+        && let Ok(n) = u32::from_str_radix(hex, 16)
+    {
+        return Color::Rgb(((n >> 16) & 0xff) as u8, ((n >> 8) & 0xff) as u8, (n & 0xff) as u8);
+    }
+
+    match raw.to_ascii_lowercase().as_str() {
+        "black" => Color::Black,
+        "red" => Color::Red,
+        "green" => Color::Green,
+        "yellow" => Color::Yellow,
+        "blue" => Color::Blue,
+        "magenta" => Color::Magenta,
+        "cyan" => Color::Cyan,
+        "gray" | "grey" => Color::Gray,
+        "darkgray" | "darkgrey" => Color::DarkGray,
+        "lightred" => Color::LightRed,
+        "lightgreen" => Color::LightGreen,
+        "lightyellow" => Color::LightYellow,
+        "lightblue" => Color::LightBlue,
+        "lightmagenta" => Color::LightMagenta,
+        "lightcyan" => Color::LightCyan,
+        "white" => Color::White,
+        _ => fallback,
+    }
+}
+
+pub fn draw(frame: &mut Frame, app: &mut App, host: &str, theme: &Theme) {
     let area = frame.area();
     let has_azure = app
         .snapshot
@@ -19,13 +80,13 @@ pub fn draw(frame: &mut Frame, app: &mut App, host: &str) {
 
     // ── outer border ──────────────────────────────────────────────────────────
     let title = Line::from(vec![
-        Span::styled(" ✦ wisp ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled("│", Style::default().fg(Color::DarkGray)),
-        Span::styled(format!(" host {} ", host), Style::default().fg(Color::DarkGray)),
+        Span::styled(" ✦ wisp ", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+        Span::styled("│", Style::default().fg(theme.muted)),
+        Span::styled(format!(" host {} ", host), Style::default().fg(theme.muted)),
     ]);
     let outer = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Blue))
+        .border_style(Style::default().fg(theme.border))
         .title(title);
     frame.render_widget(outer, area);
 
@@ -55,9 +116,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, host: &str) {
             Span::raw("  "),
             Span::styled(
                 " ⚠  reconnecting… ",
-                Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.selection_fg).bg(theme.warning).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  host hasn't responded for 15s", Style::default().fg(Color::DarkGray)),
+            Span::styled("  host hasn't responded for 15s", Style::default().fg(theme.muted)),
         ]));
         frame.render_widget(banner, ba);
     }
@@ -68,34 +129,34 @@ pub fn draw(frame: &mut Frame, app: &mut App, host: &str) {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(0), Constraint::Length(30)])
             .split(body_area);
-        draw_table(frame, app, cols[0]);
-        draw_azure_sidebar(frame, app, cols[1]);
+        draw_table(frame, app, cols[0], theme);
+        draw_azure_sidebar(frame, app, cols[1], theme);
     } else {
-        draw_table(frame, app, body_area);
+        draw_table(frame, app, body_area, theme);
     }
 
-    draw_footer(frame, app, footer_area);
+    draw_footer(frame, app, footer_area, theme);
 
     if let Some(popup) = &app.popup {
-        draw_popup(frame, popup);
+        draw_popup(frame, popup, theme);
     }
 }
 
 // ── container table ───────────────────────────────────────────────────────────
 
-fn draw_table(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
+fn draw_table(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect, theme: &Theme) {
     let table_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(Span::styled(" containers ", Style::default().fg(Color::DarkGray)));
+        .border_style(Style::default().fg(theme.muted))
+        .title(Span::styled(" containers ", Style::default().fg(theme.muted)));
     frame.render_widget(table_block, area);
     let table_area = area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
 
     let header = Row::new(["CONTAINER", "STATE", "HEALTH", "CPU%", "MEM", "NET I/O", "STATUS"].map(|h| {
         Cell::from(h).style(
             Style::default()
-                .fg(Color::White)
-                .bg(Color::DarkGray)
+                .fg(theme.text)
+                .bg(theme.muted)
                 .add_modifier(Modifier::BOLD),
         )
     }))
@@ -103,7 +164,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
 
     let rows: Vec<Row> = match &app.snapshot {
         None => vec![Row::new(vec![Cell::from(
-            Span::styled("  waiting for data…", Style::default().fg(Color::DarkGray)),
+            Span::styled("  waiting for data…", Style::default().fg(theme.muted)),
         )])],
         Some(snap) => {
             let stats_map: std::collections::HashMap<&str, &ContainerStats> =
@@ -113,7 +174,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
                 .enumerate()
                 .map(|(i, c)| {
                     let zebra = i % 2 == 0;
-                    build_row(c, stats_map.get(c.names.as_str()).copied(), zebra)
+                    build_row(c, stats_map.get(c.names.as_str()).copied(), zebra, theme)
                 })
                 .collect()
         }
@@ -133,47 +194,47 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     )
     .header(header)
     .row_highlight_style(
-        Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Style::default().fg(theme.selection_fg).bg(theme.selection_bg).add_modifier(Modifier::BOLD),
     )
     .highlight_symbol("❯ ");
 
     frame.render_stateful_widget(table, table_area, &mut app.table_state);
 }
 
-fn build_row<'a>(c: &'a ContainerInfo, stats: Option<&'a ContainerStats>, zebra: bool) -> Row<'a> {
+fn build_row<'a>(c: &'a ContainerInfo, stats: Option<&'a ContainerStats>, zebra: bool, theme: &Theme) -> Row<'a> {
     let state_style = if c.state == "running" {
-        Style::default().fg(Color::Green)
+        Style::default().fg(theme.success)
     } else {
-        Style::default().fg(Color::Red)
+        Style::default().fg(theme.danger)
     };
 
     let (cpu_str, cpu_style, mem_str, net_str) = match stats {
         None => (
             "–".to_string(),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
             "–".to_string(),
             "–".to_string(),
         ),
         Some(s) => {
-            let style = cpu_color(parse_pct(&s.cpu_perc));
+            let style = cpu_color(parse_pct(&s.cpu_perc), theme);
             (s.cpu_perc.clone(), style, s.mem_usage.clone(), s.net_io.clone())
         }
     };
 
     let status_style = if c.status.contains("unhealthy") {
-        Style::default().fg(Color::Red)
+        Style::default().fg(theme.danger)
     } else if c.status.contains("healthy") {
-        Style::default().fg(Color::Green)
+        Style::default().fg(theme.success)
     } else {
-        Style::default().fg(Color::Yellow)
+        Style::default().fg(theme.warning)
     };
 
     let health = health_label(&c.status);
     let health_style = match health {
-        "healthy" => Style::default().fg(Color::Green),
-        "unhealthy" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        "starting" => Style::default().fg(Color::Yellow),
-        _ => Style::default().fg(Color::DarkGray),
+        "healthy" => Style::default().fg(theme.success),
+        "unhealthy" => Style::default().fg(theme.danger).add_modifier(Modifier::BOLD),
+        "starting" => Style::default().fg(theme.warning),
+        _ => Style::default().fg(theme.muted),
     };
 
     let state_chip = if c.state == "running" { "● running" } else { "● stopped" };
@@ -190,7 +251,7 @@ fn build_row<'a>(c: &'a ContainerInfo, stats: Option<&'a ContainerStats>, zebra:
     .style(if zebra {
         Style::default().bg(Color::Reset)
     } else {
-        Style::default().bg(Color::Black)
+        Style::default().bg(theme.panel)
     })
 }
 
@@ -209,11 +270,11 @@ fn health_label(status: &str) -> &'static str {
 
 // ── azure sidebar ─────────────────────────────────────────────────────────────
 
-fn draw_azure_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+fn draw_azure_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::LEFT)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(Span::styled(" azure db ", Style::default().fg(Color::Cyan)));
+        .border_style(Style::default().fg(theme.muted))
+        .title(Span::styled(" azure db ", Style::default().fg(theme.accent)));
     frame.render_widget(block, area);
 
     let inner = area.inner(ratatui::layout::Margin { horizontal: 2, vertical: 1 });
@@ -231,14 +292,14 @@ fn draw_azure_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect)
         .unwrap_or("(unknown)");
 
     let name_line = Line::from(vec![
-        Span::styled("DB       ", Style::default().fg(Color::DarkGray)),
-        Span::styled(db_name, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled("DB       ", Style::default().fg(theme.muted)),
+        Span::styled(db_name, Style::default().fg(theme.text).add_modifier(Modifier::BOLD)),
     ]);
     frame.render_widget(Paragraph::new(name_line), inner);
 
     let type_line = Line::from(vec![
-        Span::styled("TYPE     ", Style::default().fg(Color::DarkGray)),
-        Span::styled(db_type, Style::default().fg(Color::White)),
+        Span::styled("TYPE     ", Style::default().fg(theme.muted)),
+        Span::styled(db_type, Style::default().fg(theme.text)),
     ]);
     let type_area = ratatui::layout::Rect {
         x: inner.x,
@@ -250,8 +311,8 @@ fn draw_azure_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect)
 
     if db.is_none() {
         let note = Paragraph::new(Line::from(vec![
-            Span::styled("azure warming… ", Style::default().fg(Color::DarkGray)),
-            Span::styled("az CLI token fetch can be slow", Style::default().fg(Color::DarkGray)),
+            Span::styled("azure warming… ", Style::default().fg(theme.muted)),
+            Span::styled("az CLI token fetch can be slow", Style::default().fg(theme.muted)),
         ]))
         .wrap(Wrap { trim: false });
         let note_area = ratatui::layout::Rect {
@@ -273,7 +334,7 @@ fn draw_azure_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect)
         height: inner.height.saturating_sub(3),
     };
 
-    let rows = azure_metric_rows(db);
+    let rows = azure_metric_rows(db, theme);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(std::iter::repeat_n(Constraint::Length(2), rows.len()).collect::<Vec<_>>())
@@ -282,31 +343,31 @@ fn draw_azure_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect)
     for (i, (label, value, style)) in rows.iter().enumerate() {
         if i >= chunks.len() { break; }
         let line = Line::from(vec![
-            Span::styled(format!("{label:<8} "), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{label:<8} "), Style::default().fg(theme.muted)),
             Span::styled(value.clone(), *style),
         ]);
         frame.render_widget(Paragraph::new(line), chunks[i]);
     }
 }
 
-fn azure_metric_rows(db: &DbMetrics) -> Vec<(String, String, Style)> {
+fn azure_metric_rows(db: &DbMetrics, theme: &Theme) -> Vec<(String, String, Style)> {
     vec![
-        ("CPU".into(),   format!("{:.1}%", db.cpu_percent),     pct_style(db.cpu_percent)),
-        ("MEM".into(),   format!("{:.1}%", db.memory_percent),  pct_style(db.memory_percent)),
-        ("STOR".into(),  format!("{:.1}%", db.storage_percent), pct_style(db.storage_percent)),
-        ("ACT CONN".into(), format!("{:.0}",  db.connections),  Style::default().fg(Color::White)),
+        ("CPU".into(),   format!("{:.1}%", db.cpu_percent),     pct_style(db.cpu_percent, theme)),
+        ("MEM".into(),   format!("{:.1}%", db.memory_percent),  pct_style(db.memory_percent, theme)),
+        ("STOR".into(),  format!("{:.1}%", db.storage_percent), pct_style(db.storage_percent, theme)),
+        ("ACT CONN".into(), format!("{:.0}",  db.connections),  Style::default().fg(theme.text)),
     ]
 }
 
-fn pct_style(pct: f64) -> Style {
-    if pct >= 80.0 { Style::default().fg(Color::Red).add_modifier(Modifier::BOLD) }
-    else if pct >= 50.0 { Style::default().fg(Color::Yellow) }
-    else { Style::default().fg(Color::Green) }
+fn pct_style(pct: f64, theme: &Theme) -> Style {
+    if pct >= 80.0 { Style::default().fg(theme.danger).add_modifier(Modifier::BOLD) }
+    else if pct >= 50.0 { Style::default().fg(theme.warning) }
+    else { Style::default().fg(theme.success) }
 }
 
 // ── footer ────────────────────────────────────────────────────────────────────
 
-fn draw_footer(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+fn draw_footer(frame: &mut Frame, app: &App, area: ratatui::layout::Rect, theme: &Theme) {
     let refresh = match app.last_updated {
         None    => "waiting…".to_string(),
         Some(t) => format!("{}s ago", t.elapsed().as_secs()),
@@ -315,7 +376,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     // Pending restart message supersedes normal hints for 8 s.
     let right = if let Some((msg, _)) = &app.pending_action {
         Line::from(vec![
-            Span::styled(format!(" ⟳ {}", msg), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" ⟳ {}", msg), Style::default().fg(theme.warning).add_modifier(Modifier::BOLD)),
         ])
     } else {
         let azure_loading = app
@@ -325,35 +386,35 @@ fn draw_footer(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             .unwrap_or(false);
 
         let mut spans = vec![
-            Span::styled("[q]", Style::default().fg(Color::Yellow)),
-            Span::styled(" quit  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("• ", Style::default().fg(Color::DarkGray)),
-            Span::styled("[jk/↑↓]", Style::default().fg(Color::Yellow)),
-            Span::styled(" select  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("• ", Style::default().fg(Color::DarkGray)),
-            Span::styled("[r]", Style::default().fg(Color::Yellow)),
-            Span::styled(" restart  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("[a]", Style::default().fg(Color::Yellow)),
-            Span::styled(" start  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("[x]", Style::default().fg(Color::Yellow)),
-            Span::styled(" stop  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("[enter]", Style::default().fg(Color::Yellow)),
-            Span::styled(" inspect  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("[l]", Style::default().fg(Color::Yellow)),
-            Span::styled(" logs  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("[d]", Style::default().fg(Color::Yellow)),
-            Span::styled(" disk  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("[p][p]", Style::default().fg(Color::Yellow)),
-            Span::styled(" prune  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("• ", Style::default().fg(Color::DarkGray)),
-            Span::styled("[:8080]", Style::default().fg(Color::Blue)),
-            Span::styled(" web  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(refresh, Style::default().fg(Color::DarkGray)),
+            Span::styled("[q]", Style::default().fg(theme.warning)),
+            Span::styled(" quit  ", Style::default().fg(theme.muted)),
+            Span::styled("• ", Style::default().fg(theme.muted)),
+            Span::styled("[jk/↑↓]", Style::default().fg(theme.warning)),
+            Span::styled(" select  ", Style::default().fg(theme.muted)),
+            Span::styled("• ", Style::default().fg(theme.muted)),
+            Span::styled("[r]", Style::default().fg(theme.warning)),
+            Span::styled(" restart  ", Style::default().fg(theme.muted)),
+            Span::styled("[a]", Style::default().fg(theme.warning)),
+            Span::styled(" start  ", Style::default().fg(theme.muted)),
+            Span::styled("[x]", Style::default().fg(theme.warning)),
+            Span::styled(" stop  ", Style::default().fg(theme.muted)),
+            Span::styled("[enter]", Style::default().fg(theme.warning)),
+            Span::styled(" inspect  ", Style::default().fg(theme.muted)),
+            Span::styled("[l]", Style::default().fg(theme.warning)),
+            Span::styled(" logs  ", Style::default().fg(theme.muted)),
+            Span::styled("[d]", Style::default().fg(theme.warning)),
+            Span::styled(" disk  ", Style::default().fg(theme.muted)),
+            Span::styled("[p][p]", Style::default().fg(theme.warning)),
+            Span::styled(" prune  ", Style::default().fg(theme.muted)),
+            Span::styled("• ", Style::default().fg(theme.muted)),
+            Span::styled("[:8080]", Style::default().fg(theme.border)),
+            Span::styled(" web  ", Style::default().fg(theme.muted)),
+            Span::styled(refresh, Style::default().fg(theme.muted)),
         ];
 
         if azure_loading {
-            spans.push(Span::styled("  •  ", Style::default().fg(Color::DarkGray)));
-            spans.push(Span::styled("azure pending (az cli slow)", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled("  •  ", Style::default().fg(theme.muted)));
+            spans.push(Span::styled("azure pending (az cli slow)", Style::default().fg(theme.muted)));
         }
 
         Line::from(spans)
@@ -368,16 +429,16 @@ fn parse_pct(s: &str) -> Option<f64> {
     s.trim_end_matches('%').parse().ok()
 }
 
-fn cpu_color(pct: Option<f64>) -> Style {
+fn cpu_color(pct: Option<f64>, theme: &Theme) -> Style {
     match pct {
-        None => Style::default().fg(Color::DarkGray),
-        Some(p) if p >= 20.0 => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        Some(p) if p >= 5.0  => Style::default().fg(Color::Yellow),
-        Some(_) => Style::default().fg(Color::Green),
+        None => Style::default().fg(theme.muted),
+        Some(p) if p >= 20.0 => Style::default().fg(theme.danger).add_modifier(Modifier::BOLD),
+        Some(p) if p >= 5.0  => Style::default().fg(theme.warning),
+        Some(_) => Style::default().fg(theme.success),
     }
 }
 
-fn draw_popup(frame: &mut Frame, popup: &Popup) {
+fn draw_popup(frame: &mut Frame, popup: &Popup, theme: &Theme) {
     let area = frame.area();
 
     if area.width < 24 || area.height < 8 {
@@ -386,8 +447,8 @@ fn draw_popup(frame: &mut Frame, popup: &Popup) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray))
-                    .title(Span::styled(" popup ", Style::default().fg(Color::Yellow))),
+                    .border_style(Style::default().fg(theme.muted))
+                    .title(Span::styled(" popup ", Style::default().fg(theme.warning))),
             )
             .wrap(Wrap { trim: false });
         frame.render_widget(tiny, area);
@@ -404,14 +465,14 @@ fn draw_popup(frame: &mut Frame, popup: &Popup) {
     };
 
     let title_style = if popup.is_error {
-        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        Style::default().fg(theme.danger).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)
+        Style::default().fg(theme.border).add_modifier(Modifier::BOLD)
     };
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(Style::default().fg(theme.muted))
         .title(Span::styled(format!(" {} ", popup.title), title_style));
 
     frame.render_widget(Clear, popup_area);
@@ -436,7 +497,7 @@ fn draw_popup(frame: &mut Frame, popup: &Popup) {
         "[mouse wheel/jk/↑↓/pgup/pgdn] scroll  [home/end] jump  [esc/enter/q] close"
     };
     frame.render_widget(
-        Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))),
+        Paragraph::new(Span::styled(hint, Style::default().fg(theme.muted))),
         chunks[1],
     );
 }
