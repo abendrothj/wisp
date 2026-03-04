@@ -255,6 +255,27 @@ Planned:
 - Optional first-run bootstrap flow to create initial profile
 - Keep advanced flags available, but make them optional for daily use
 
+## Release process
+
+Tag-based release publishing is automated via GitHub Actions.
+
+When you push a tag like `v1.0.0`, CI builds and attaches:
+- `wisp-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`
+- `wisp-vX.Y.Z-x86_64-apple-darwin.tar.gz`
+- `wisp-vX.Y.Z-aarch64-apple-darwin.tar.gz`
+- `wisp-vX.Y.Z-x86_64-pc-windows-msvc.zip`
+- `SHA256SUMS`
+
+Typical release commands:
+
+```bash
+git checkout main
+git pull --ff-only
+git tag -a v1.0.0 -m "wisp v1.0.0"
+git push origin main
+git push origin v1.0.0
+```
+
 ## License
 
 Add your project license here (for example: MIT).
