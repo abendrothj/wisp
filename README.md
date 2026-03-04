@@ -56,9 +56,10 @@ For Azure Database for PostgreSQL Flexible Server or MySQL Flexible Server:
 ## Requirements
 
 - Rust toolchain (edition 2024 project)
-- Tailscale with SSH enabled between your machine and target host
 - Docker installed on target host
-- Optional standard SSH client (`ssh`) only if using `--ssh` mode
+- Transport requirements (choose one):
+  - Tailscale mode (default): Tailscale with SSH enabled between your machine and target host
+  - SSH mode (`--ssh`): OpenSSH client (`ssh`) and reachable SSH service on target host
 - `tailscale` CLI if using Tailscale mode with TUI shell escape (`s`)
 - Optional Azure monitoring:
   - Azure CLI (`az`) installed and logged in, or `AZURE_ACCESS_TOKEN`
