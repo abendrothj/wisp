@@ -29,6 +29,8 @@ pub fn router(state: WebState) -> Router {
     Router::new()
         .route("/", get(index_handler))
         .route("/ws", get(ws::handler))
+        .route("/api/action/start", post(start_handler))
+        .route("/api/action/stop", post(stop_handler))
         .route("/api/action/restart", post(restart_handler))
         .route("/api/action/logs", post(logs_handler))
         .route("/api/action/inspect", post(inspect_handler))
@@ -53,6 +55,20 @@ async fn restart_handler(
     Json(req): Json<NameActionRequest>,
 ) -> impl IntoResponse {
     run_action(state.action_tx.clone(), RemoteAction::Restart { name: req.name }).await
+}
+
+async fn start_handler(
+    State(state): State<WebState>,
+    Json(req): Json<NameActionRequest>,
+) -> impl IntoResponse {
+    run_action(state.action_tx.clone(), RemoteAction::Start { name: req.name }).await
+}
+
+async fn stop_handler(
+    State(state): State<WebState>,
+    Json(req): Json<NameActionRequest>,
+) -> impl IntoResponse {
+    run_action(state.action_tx.clone(), RemoteAction::Stop { name: req.name }).await
 }
 
 async fn logs_handler(

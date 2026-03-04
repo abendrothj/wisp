@@ -32,7 +32,7 @@ pub struct App {
 }
 
 pub enum PendingMode {
-    Restart,
+    ToastSuccess(String),
     Popup,
 }
 
@@ -166,7 +166,7 @@ fn run_loop(
                                 scroll: 0,
                             });
                         }
-                        Some(PendingMode::Restart) | None => {
+                        Some(PendingMode::ToastSuccess(message)) => {
                             if result.is_error {
                                 app.popup = Some(Popup {
                                     title: result.title,
@@ -176,7 +176,18 @@ fn run_loop(
                                     scroll: 0,
                                 });
                             } else {
-                                app.pending_action = Some(("restart complete".to_string(), Instant::now()));
+                                app.pending_action = Some((message, Instant::now()));
+                            }
+                        }
+                        None => {
+                            if result.is_error {
+                                app.popup = Some(Popup {
+                                    title: result.title,
+                                    body: result.output,
+                                    is_error: true,
+                                    loading: false,
+                                    scroll: 0,
+                                });
                             }
                         }
                     }
@@ -253,9 +264,45 @@ fn run_loop(
                                 };
                                 if action_tx.blocking_send(req).is_ok() {
                                     app.pending_result = Some(rx);
-                                    app.pending_mode = Some(PendingMode::Restart);
+                                    app.pending_mode = Some(PendingMode::ToastSuccess(format!("{} restarted", name)));
                                     app.pending_action = Some((
                                         format!("restarting {}…", name),
+                                        Instant::now(),
+                                    ));
+                                }
+                            }
+                        }
+
+                        KeyCode::Char('a') => {
+                            if let Some(name) = app.selected_name() {
+                                let (tx, rx) = oneshot::channel();
+                                let req = RemoteActionRequest {
+                                    action: RemoteAction::Start { name: name.clone() },
+                                    respond_to: tx,
+                                };
+                                if action_tx.blocking_send(req).is_ok() {
+                                    app.pending_result = Some(rx);
+                                    app.pending_mode = Some(PendingMode::ToastSuccess(format!("{} started", name)));
+                                    app.pending_action = Some((
+                                        format!("starting {}…", name),
+                                        Instant::now(),
+                                    ));
+                                }
+                            }
+                        }
+
+                        KeyCode::Char('x') => {
+                            if let Some(name) = app.selected_name() {
+                                let (tx, rx) = oneshot::channel();
+                                let req = RemoteActionRequest {
+                                    action: RemoteAction::Stop { name: name.clone() },
+                                    respond_to: tx,
+                                };
+                                if action_tx.blocking_send(req).is_ok() {
+                                    app.pending_result = Some(rx);
+                                    app.pending_mode = Some(PendingMode::ToastSuccess(format!("{} stopped", name)));
+                                    app.pending_action = Some((
+                                        format!("stopping {}…", name),
                                         Instant::now(),
                                     ));
                                 }

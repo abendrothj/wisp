@@ -16,6 +16,8 @@ use config::Config;
 
 #[derive(Debug, Clone)]
 pub enum RemoteAction {
+    Start { name: String },
+    Stop { name: String },
     Restart { name: String },
     Logs { name: String },
     Inspect { name: String },
@@ -285,6 +287,62 @@ async fn poll_loop(
 
             Some(request) = action_rx.recv() => {
                 let result = match request.action {
+                    RemoteAction::Start { name } => {
+                        tracing::debug!("starting container: {name}");
+                        match tokio::time::timeout(
+                            Duration::from_secs(30),
+                            session.exec(&format!("docker start {}", shell_quote(&name))),
+                        ).await {
+                            Ok(Ok(output)) => RemoteActionResult {
+                                title: format!("Start: {name}"),
+                                output: if output.trim().is_empty() {
+                                    format!("{name} started")
+                                } else {
+                                    sanitize_for_tui(output)
+                                },
+                                is_error: false,
+                            },
+                            Ok(Err(e)) => RemoteActionResult {
+                                title: format!("Start: {name}"),
+                                output: format!("{e:#}"),
+                                is_error: true,
+                            },
+                            Err(_) => RemoteActionResult {
+                                title: format!("Start: {name}"),
+                                output: "start timed out after 30s".to_string(),
+                                is_error: true,
+                            },
+                        }
+                    }
+
+                    RemoteAction::Stop { name } => {
+                        tracing::debug!("stopping container: {name}");
+                        match tokio::time::timeout(
+                            Duration::from_secs(30),
+                            session.exec(&format!("docker stop {}", shell_quote(&name))),
+                        ).await {
+                            Ok(Ok(output)) => RemoteActionResult {
+                                title: format!("Stop: {name}"),
+                                output: if output.trim().is_empty() {
+                                    format!("{name} stopped")
+                                } else {
+                                    sanitize_for_tui(output)
+                                },
+                                is_error: false,
+                            },
+                            Ok(Err(e)) => RemoteActionResult {
+                                title: format!("Stop: {name}"),
+                                output: format!("{e:#}"),
+                                is_error: true,
+                            },
+                            Err(_) => RemoteActionResult {
+                                title: format!("Stop: {name}"),
+                                output: "stop timed out after 30s".to_string(),
+                                is_error: true,
+                            },
+                        }
+                    }
+
                     RemoteAction::Restart { name } => {
                         tracing::debug!("restarting container: {name}");
                         match tokio::time::timeout(

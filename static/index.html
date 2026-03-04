@@ -301,6 +301,8 @@
             <td class="${stc}">${c.Status}</td>
             <td>
               <div class="actions">
+                <button class="warn" onclick="wispStart(${JSON.stringify(c.Names)})">start</button>
+                <button class="warn" onclick="wispStop(${JSON.stringify(c.Names)})">stop</button>
                 <button onclick="wispInspect(${JSON.stringify(c.Names)})">inspect</button>
                 <button class="warn" onclick="wispLogs(${JSON.stringify(c.Names)})">logs</button>
                 <button class="danger" onclick="wispRestart(${JSON.stringify(c.Names)})">restart</button>
@@ -366,6 +368,14 @@
 
     window.wispLogs = async function(name) {
       await runAction('/api/action/logs', { name });
+    };
+
+    window.wispStart = async function(name) {
+      await runAction('/api/action/start', { name });
+    };
+
+    window.wispStop = async function(name) {
+      await runAction('/api/action/stop', { name });
     };
 
     window.wispInspect = async function(name) {

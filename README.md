@@ -13,6 +13,8 @@ Tailscale-native, agentless infrastructure control plane.
 - CPU %, memory usage
 - Network I/O (`docker stats` `NetIO`)
 - On-demand actions:
+  - Start container
+  - Stop container
   - Restart container
   - View logs (`docker logs -n 50 <name>`)
   - Disk usage (`docker system df`)
@@ -94,6 +96,8 @@ Global:
 - `j/k` or `↑/↓`: move selection
 
 Container actions:
+- `a`: start selected container
+- `x`: stop selected container
 - `r`: restart selected container
 - `Enter`: inspect selected container (`docker inspect <name>`)
 - `l`: open log viewer for selected container (last 50 lines)
@@ -109,6 +113,8 @@ Popup controls:
 ## Web controls
 
 - `disk usage` button: runs `docker system df`
+- Per-container `start` button: runs `docker start <name>`
+- Per-container `stop` button: runs `docker stop <name>`
 - Per-container `inspect` button: runs `docker inspect <name>`
 - Per-container `logs` button: runs `docker logs -n 50 <name>`
 - Per-container `restart` button: runs `docker restart <name>`
