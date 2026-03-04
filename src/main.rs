@@ -230,14 +230,7 @@ async fn main() -> Result<()> {
     }
 
     // ── TUI (blocks; tokio keeps polling + web tasks alive) ──────────────────
-    let shell_target = tui::ShellTarget {
-        host: cfg.host.clone(),
-        port: cfg.port,
-        user: cfg.user.clone(),
-        transport: cfg.transport,
-    };
-
-    tokio::task::block_in_place(|| tui::run(&cfg.host, snap_rx, action_tx, shell_target))?;
+    tokio::task::block_in_place(|| tui::run(&cfg.host, snap_rx, action_tx))?;
 
     Ok(())
 }

@@ -339,8 +339,6 @@ fn draw_footer(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             Span::styled(" stop  ", Style::default().fg(Color::DarkGray)),
             Span::styled("[enter]", Style::default().fg(Color::Yellow)),
             Span::styled(" inspect  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("[s]", Style::default().fg(Color::Yellow)),
-            Span::styled(" shell  ", Style::default().fg(Color::DarkGray)),
             Span::styled("[l]", Style::default().fg(Color::Yellow)),
             Span::styled(" logs  ", Style::default().fg(Color::DarkGray)),
             Span::styled("[d]", Style::default().fg(Color::Yellow)),

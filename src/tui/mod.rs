@@ -1,6 +1,6 @@
 pub mod ui;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind},
     execute,
@@ -9,12 +9,10 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend, widgets::TableState};
 use std::{
     io,
-    process::{Command, Stdio},
     time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
-use crate::ssh::Transport;
 use crate::telemetry::Snapshot;
 use crate::{RemoteAction, RemoteActionRequest, RemoteActionResult};
 
@@ -45,14 +43,6 @@ pub struct Popup {
     pub is_error: bool,
     pub loading: bool,
     pub scroll: u16,
-}
-
-#[derive(Clone)]
-pub struct ShellTarget {
-    pub host: String,
-    pub port: u16,
-    pub user: String,
-    pub transport: Transport,
 }
 
 impl App {
@@ -117,7 +107,6 @@ pub fn run(
     host: &str,
     mut rx: watch::Receiver<Option<Snapshot>>,
     action_tx: mpsc::Sender<RemoteActionRequest>,
-    shell_target: ShellTarget,
 ) -> Result<()> {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -136,7 +125,6 @@ pub fn run(
         host,
         &mut rx,
         &action_tx,
-        &shell_target,
     );
 
     restore_terminal()?;
@@ -149,7 +137,6 @@ fn run_loop(
     host: &str,
     rx: &mut watch::Receiver<Option<Snapshot>>,
     action_tx: &mpsc::Sender<RemoteActionRequest>,
-    shell_target: &ShellTarget,
 ) -> Result<()> {
     let tick = Duration::from_millis(16);
 
@@ -416,32 +403,6 @@ fn run_loop(
                             }
                         }
 
-                        KeyCode::Char('s') => {
-                            if let Some(name) = app.selected_name() {
-                                app.pending_action = Some((
-                                    format!("opening shell in {}…", name),
-                                    Instant::now(),
-                                ));
-                                match open_container_shell(terminal, shell_target, &name) {
-                                    Ok(()) => {
-                                        app.pending_action = Some((
-                                            format!("shell closed for {}", name),
-                                            Instant::now(),
-                                        ));
-                                    }
-                                    Err(e) => {
-                                        app.popup = Some(Popup {
-                                            title: format!("Shell: {name}"),
-                                            body: format!("{e:#}"),
-                                            is_error: true,
-                                            loading: false,
-                                            scroll: 0,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-
                         _ => {}
                     }
                 }
@@ -475,115 +436,4 @@ fn popup_scroll_up(app: &mut App, amount: u16) {
     if let Some(popup) = app.popup.as_mut() {
         popup.scroll = popup.scroll.saturating_sub(amount);
     }
-}
-
-fn open_container_shell(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    target: &ShellTarget,
-    name: &str,
-) -> Result<()> {
-    restore_terminal()?;
-
-    let mut first_error: Option<anyhow::Error> = None;
-    for shell in ["/bin/sh", "/bin/bash"] {
-        match run_shell_command(target, name, shell) {
-            Ok(()) => {
-                first_error = None;
-                break;
-            }
-            Err(e) => {
-                if first_error.is_none() {
-                    first_error = Some(e);
-                }
-            }
-        }
-    }
-
-    setup_terminal()?;
-    terminal.clear()?;
-
-    if let Some(e) = first_error {
-        return Err(e);
-    }
-
-    Ok(())
-}
-
-fn run_shell_command(target: &ShellTarget, name: &str, shell: &str) -> Result<()> {
-    let candidates = match target.transport {
-        Transport::Tailscale => [
-            format!("docker exec -i {} {}", shell_quote(name), shell),
-            format!("docker exec {} {}", shell_quote(name), shell),
-        ]
-        .to_vec(),
-        Transport::Ssh => [
-            format!("docker exec -it {} {}", shell_quote(name), shell),
-            format!("docker exec -i {} {}", shell_quote(name), shell),
-            format!("docker exec {} {}", shell_quote(name), shell),
-        ]
-        .to_vec(),
-    };
-
-    let mut last_error: Option<anyhow::Error> = None;
-    for command in candidates {
-        match run_remote_interactive(target, &command) {
-            Ok(()) => return Ok(()),
-            Err(e) => last_error = Some(e),
-        }
-    }
-
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("failed to launch container shell")))
-}
-
-fn run_remote_interactive(target: &ShellTarget, command: &str) -> Result<()> {
-    let status = match target.transport {
-        Transport::Tailscale => {
-            let mut cmd = Command::new("tailscale");
-            cmd.args([
-                "ssh",
-                &format!("{}@{}", target.user, target.host),
-                "--",
-                command,
-            ]);
-            cmd.stdin(Stdio::inherit())
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .status()
-                .context("failed to run tailscale ssh")?
-        }
-        Transport::Ssh => {
-            let mut cmd = Command::new("ssh");
-            cmd.args([
-                "-tt",
-                "-p",
-                &target.port.to_string(),
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "StrictHostKeyChecking=yes",
-                &format!("{}@{}", target.user, target.host),
-                command,
-            ]);
-            cmd.stdin(Stdio::inherit())
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .status()
-                .context("failed to run ssh")?
-        }
-    };
-
-    if status.success() {
-        return Ok(());
-    }
-
-    anyhow::bail!(
-        "remote shell command failed: `{}` (status: {})",
-        command,
-        status
-    )
-}
-
-fn shell_quote(value: &str) -> String {
-    let escaped = value.replace('\'', "'\"'\"'");
-    format!("'{escaped}'")
 }

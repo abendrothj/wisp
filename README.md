@@ -35,10 +35,11 @@ In short: less dashboard theater, more useful buttons.
   - Stop container
   - Restart container
   - Inspect container (`docker inspect <name>`)
-  - Open shell in container (`docker exec -it <name> /bin/sh`)
   - View logs (`docker logs -n 50 <name>`)
   - Disk usage (`docker system df`)
   - Guarded prune of stopped containers (`docker container prune -f`)
+
+Interactive shells are intentionally out of scope for `wisp` reliability; use direct SSH when you need a shell session.
 
 These actions are available in both TUI and web dashboard.
 
@@ -60,7 +61,7 @@ For Azure Database for PostgreSQL Flexible Server or MySQL Flexible Server:
 - Transport requirements (choose one):
   - Tailscale mode (default): Tailscale with SSH enabled between your machine and target host
   - SSH mode (`--ssh`): OpenSSH client (`ssh`) and reachable SSH service on target host
-- `tailscale` CLI if using Tailscale mode with TUI shell escape (`s`)
+- `tailscale` CLI if using Tailscale mode
 - Optional Azure monitoring:
   - Azure CLI (`az`) installed and logged in, or `AZURE_ACCESS_TOKEN`
 
@@ -123,7 +124,6 @@ Container actions:
 - `x`: stop selected container
 - `r`: restart selected container
 - `Enter`: inspect selected container (`docker inspect <name>`)
-- `s`: open interactive shell in selected container (`docker exec -it <name> /bin/sh`)
 - `l`: open log viewer for selected container (last 50 lines)
 - `d`: open Docker disk usage (`docker system df`)
 - `p` then `p` (within 5s): guarded prune of stopped containers
