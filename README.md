@@ -65,6 +65,61 @@ For Azure Database for PostgreSQL Flexible Server or MySQL Flexible Server:
 - Optional Azure monitoring:
   - Azure CLI (`az`) installed and logged in, or `AZURE_ACCESS_TOKEN`
 
+## Install from zero
+
+### 0) Install Rust
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+```
+
+### 1) Clone
+
+```bash
+git clone <your-repo-url>
+cd wisp
+```
+
+### 2) Set up Tailscale
+
+Follow official docs:
+- https://tailscale.com/download
+- https://tailscale.com/kb/1193/tailscale-ssh
+
+### 3) Build + run
+
+```bash
+cargo build
+cargo run -- -H <tailscale-ip> -u <user>
+```
+
+### 4) Install to PATH (optional)
+
+```bash
+cargo install --path .
+wisp --version
+```
+
+If `wisp` is not found, ensure Cargo bin dir is on your PATH:
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+```
+
+## Alternative: SSH mode
+
+Use when you explicitly do not want Tailscale transport:
+
+```bash
+cargo run -- --ssh -H <host> -u <user> [-p <port>]
+```
+
+⚠ `--ssh` is less safe by default because it often implies opening SSH ports.
+- Keep SSH ports closed to public internet.
+- Prefer Tailscale mode when possible.
+- If SSH is required, restrict ingress aggressively (CIDRs/firewall/bastion).
+
 ## Build
 
 ```bash
@@ -83,15 +138,6 @@ Optional flags:
 - `-i, --interval <seconds>`: Docker poll interval
 - `--web-port <port>`: local web dashboard port (default 8080)
 - `--ssh`: use standard SSH transport instead of Tailscale SSH
-
-### Security note on `--ssh`
-
-`--ssh` is less safe by default because it often implies opening SSH ports.
-
-Recommendation:
-- keep SSH ports closed to the public internet
-- prefer Tailscale mode whenever possible
-- if SSH must be used, restrict ingress aggressively (CIDRs, firewall rules, bastion)
 
 ## Setup wizard (Azure)
 
