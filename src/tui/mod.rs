@@ -2,7 +2,7 @@ pub mod ui;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -11,9 +11,10 @@ use std::{
     io,
     time::{Duration, Instant},
 };
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::telemetry::Snapshot;
+use crate::{RemoteAction, RemoteActionRequest, RemoteActionResult};
 
 /// How long without a fresh snapshot before we show "reconnecting…"
 const STALE_THRESHOLD: Duration = Duration::from_secs(15);
@@ -25,6 +26,22 @@ pub struct App {
     row_count: usize,
     /// Brief status message after an action (e.g. "restarting finlingo-admin…")
     pub pending_action: Option<(String, Instant)>,
+    pub popup: Option<Popup>,
+    pub pending_result: Option<oneshot::Receiver<RemoteActionResult>>,
+    pub pending_mode: Option<PendingMode>,
+}
+
+pub enum PendingMode {
+    Restart,
+    Popup,
+}
+
+pub struct Popup {
+    pub title: String,
+    pub body: String,
+    pub is_error: bool,
+    pub loading: bool,
+    pub scroll: u16,
 }
 
 impl App {
@@ -35,6 +52,9 @@ impl App {
             table_state: TableState::default(),
             row_count: 0,
             pending_action: None,
+            popup: None,
+            pending_result: None,
+            pending_mode: None,
         }
     }
 
@@ -85,7 +105,7 @@ impl App {
 pub fn run(
     host: &str,
     mut rx: watch::Receiver<Option<Snapshot>>,
-    restart_tx: mpsc::Sender<String>,
+    action_tx: mpsc::Sender<RemoteActionRequest>,
 ) -> Result<()> {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -98,7 +118,13 @@ pub fn run(
     let mut app = App::new();
     app.table_state.select(Some(0));
 
-    let result = run_loop(&mut terminal, &mut app, host, &mut rx, &restart_tx);
+    let result = run_loop(
+        &mut terminal,
+        &mut app,
+        host,
+        &mut rx,
+        &action_tx,
+    );
 
     restore_terminal()?;
     result
@@ -109,7 +135,7 @@ fn run_loop(
     app: &mut App,
     host: &str,
     rx: &mut watch::Receiver<Option<Snapshot>>,
-    restart_tx: &mpsc::Sender<String>,
+    action_tx: &mpsc::Sender<RemoteActionRequest>,
 ) -> Result<()> {
     let tick = Duration::from_millis(16);
 
@@ -126,31 +152,161 @@ fn run_loop(
             app.pending_action = None;
         }
 
+        if let Some(rx) = app.pending_result.as_mut() {
+            match rx.try_recv() {
+                Ok(result) => {
+                    app.pending_action = None;
+                    match app.pending_mode.take() {
+                        Some(PendingMode::Popup) => {
+                            app.popup = Some(Popup {
+                                title: result.title,
+                                body: result.output,
+                                is_error: result.is_error,
+                                loading: false,
+                                scroll: 0,
+                            });
+                        }
+                        Some(PendingMode::Restart) | None => {
+                            if result.is_error {
+                                app.popup = Some(Popup {
+                                    title: result.title,
+                                    body: result.output,
+                                    is_error: true,
+                                    loading: false,
+                                    scroll: 0,
+                                });
+                            } else {
+                                app.pending_action = Some(("restart complete".to_string(), Instant::now()));
+                            }
+                        }
+                    }
+                    app.pending_result = None;
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    app.pending_result = None;
+                    app.pending_mode = None;
+                    app.popup = Some(Popup {
+                        title: "Action failed".to_string(),
+                        body: "action result channel closed unexpectedly".to_string(),
+                        is_error: true,
+                        loading: false,
+                        scroll: 0,
+                    });
+                }
+            }
+        }
+
         terminal.draw(|frame| ui::draw(frame, app, host))?;
 
         if event::poll(tick)? {
-            if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Char('c')
-                        if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-
-                    KeyCode::Down | KeyCode::Char('j') => app.select_next(),
-                    KeyCode::Up   | KeyCode::Char('k') => app.select_prev(),
-
-                    KeyCode::Char('r') => {
-                        if let Some(name) = app.selected_name() {
-                            // blocking_send is valid inside block_in_place.
-                            let _ = restart_tx.blocking_send(name.clone());
-                            app.pending_action = Some((
-                                format!("restarting {}…", name),
-                                Instant::now(),
-                            ));
+            match event::read()? {
+                Event::Mouse(mouse) => {
+                    if app.popup.is_some() {
+                        match mouse.kind {
+                            MouseEventKind::ScrollDown => popup_scroll_down(app, 3),
+                            MouseEventKind::ScrollUp => popup_scroll_up(app, 3),
+                            _ => {}
                         }
                     }
-
-                    _ => {}
                 }
+
+                Event::Key(key) => {
+                    if app.popup.is_some() {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                                app.popup = None;
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => popup_scroll_down(app, 1),
+                            KeyCode::Up | KeyCode::Char('k') => popup_scroll_up(app, 1),
+                            KeyCode::PageDown => popup_scroll_down(app, 10),
+                            KeyCode::PageUp => popup_scroll_up(app, 10),
+                            KeyCode::Home => {
+                                if let Some(p) = app.popup.as_mut() {
+                                    p.scroll = 0;
+                                }
+                            }
+                            KeyCode::End => {
+                                if let Some(p) = app.popup.as_mut() {
+                                    p.scroll = u16::MAX;
+                                }
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    match key.code {
+                        KeyCode::Char('q') => break,
+                        KeyCode::Char('c')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+
+                        KeyCode::Down | KeyCode::Char('j') => app.select_next(),
+                        KeyCode::Up   | KeyCode::Char('k') => app.select_prev(),
+
+                        KeyCode::Char('r') => {
+                            if let Some(name) = app.selected_name() {
+                                let (tx, rx) = oneshot::channel();
+                                let req = RemoteActionRequest {
+                                    action: RemoteAction::Restart { name: name.clone() },
+                                    respond_to: tx,
+                                };
+                                if action_tx.blocking_send(req).is_ok() {
+                                    app.pending_result = Some(rx);
+                                    app.pending_mode = Some(PendingMode::Restart);
+                                    app.pending_action = Some((
+                                        format!("restarting {}…", name),
+                                        Instant::now(),
+                                    ));
+                                }
+                            }
+                        }
+
+                        KeyCode::Char('l') => {
+                            if let Some(name) = app.selected_name() {
+                                let (tx, rx) = oneshot::channel();
+                                let req = RemoteActionRequest {
+                                    action: RemoteAction::Logs { name: name.clone() },
+                                    respond_to: tx,
+                                };
+                                if action_tx.blocking_send(req).is_ok() {
+                                    app.pending_result = Some(rx);
+                                    app.pending_mode = Some(PendingMode::Popup);
+                                    app.popup = Some(Popup {
+                                        title: format!("Logs: {name}"),
+                                        body: "fetching last 50 lines…".to_string(),
+                                        is_error: false,
+                                        loading: true,
+                                        scroll: 0,
+                                    });
+                                }
+                            }
+                        }
+
+                        KeyCode::Char('d') => {
+                            let (tx, rx) = oneshot::channel();
+                            let req = RemoteActionRequest {
+                                action: RemoteAction::SystemDf,
+                                respond_to: tx,
+                            };
+                            if action_tx.blocking_send(req).is_ok() {
+                                app.pending_result = Some(rx);
+                                app.pending_mode = Some(PendingMode::Popup);
+                                app.popup = Some(Popup {
+                                    title: "Docker Disk Usage".to_string(),
+                                    body: "running docker system df…".to_string(),
+                                    is_error: false,
+                                    loading: true,
+                                    scroll: 0,
+                                });
+                            }
+                        }
+
+                        _ => {}
+                    }
+                }
+
+                _ => {}
             }
         }
     }
@@ -159,12 +315,24 @@ fn run_loop(
 
 fn setup_terminal() -> Result<()> {
     enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen)?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
     Ok(())
 }
 
 fn restore_terminal() -> Result<()> {
     disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen)?;
+    execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
     Ok(())
+}
+
+fn popup_scroll_down(app: &mut App, amount: u16) {
+    if let Some(popup) = app.popup.as_mut() {
+        popup.scroll = popup.scroll.saturating_add(amount);
+    }
+}
+
+fn popup_scroll_up(app: &mut App, amount: u16) {
+    if let Some(popup) = app.popup.as_mut() {
+        popup.scroll = popup.scroll.saturating_sub(amount);
+    }
 }

@@ -9,10 +9,30 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use std::time::Duration;
 use telemetry::azure;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{error, warn};
 
 use config::Config;
+
+#[derive(Debug, Clone)]
+pub enum RemoteAction {
+    Restart { name: String },
+    Logs { name: String },
+    SystemDf,
+}
+
+#[derive(Debug)]
+pub struct RemoteActionRequest {
+    pub action: RemoteAction,
+    pub respond_to: oneshot::Sender<RemoteActionResult>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteActionResult {
+    pub title: String,
+    pub output: String,
+    pub is_error: bool,
+}
 
 /// wisp — Tailscale-native, agentless infrastructure control plane
 #[derive(Parser, Debug)]
@@ -42,6 +62,13 @@ struct Args {
     #[arg(long)]
     web_port: Option<u16>,
 
+    /// Use standard SSH instead of Tailscale SSH.
+    ///
+    /// Unsafe default posture for internet-facing hosts: requires open SSH ports.
+    /// Prefer Tailscale mode unless absolutely necessary.
+    #[arg(long)]
+    ssh: bool,
+
     #[arg(long, env = "AZURE_SUBSCRIPTION_ID")]
     azure_subscription_id: Option<String>,
 
@@ -64,6 +91,7 @@ struct Resolved {
     interval: Duration,
     web_port: u16,
     azure:    Option<azure::AzureConfig>,
+    transport: ssh::Transport,
 }
 
 impl Resolved {
@@ -80,6 +108,11 @@ impl Resolved {
         let user     = args.user.clone().unwrap_or_else(|| file.host.user.clone());
         let interval = Duration::from_secs(args.interval.unwrap_or(file.host.interval));
         let web_port = args.web_port.unwrap_or(file.web.port);
+        let transport = if args.ssh {
+            ssh::Transport::Ssh
+        } else {
+            file.host.transport()
+        };
 
         // CLI Azure args take priority over config file
         let azure = if args.azure_subscription_id.is_some() {
@@ -88,7 +121,7 @@ impl Resolved {
             file.azure_config()
         };
 
-        Ok(Self { host, port, user, interval, web_port, azure })
+        Ok(Self { host, port, user, interval, web_port, azure, transport })
     }
 }
 
@@ -113,11 +146,11 @@ fn args_azure_config(args: &Args) -> Option<azure::AzureConfig> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("off"));
+
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("wisp=info".parse()?),
-        )
+        .with_env_filter(env_filter)
         .with_writer(std::io::stderr)
         .init();
 
@@ -130,6 +163,13 @@ async fn main() -> Result<()> {
     let file_config = Config::load();
     let cfg = Resolved::build(&args, file_config)?;
 
+    if cfg.transport == ssh::Transport::Ssh {
+        eprintln!(
+            "⚠ standard SSH mode enabled (--ssh): this usually requires open SSH ports and is less safe than Tailscale SSH."
+        );
+        eprintln!("⚠ recommendation: keep SSH ports closed to public internet and prefer Tailscale mode.");
+    }
+
     if cfg.azure.is_some() {
         tracing::info!("azure db monitoring enabled");
     } else {
@@ -137,26 +177,39 @@ async fn main() -> Result<()> {
     }
 
     let (snap_tx, snap_rx)     = watch::channel::<Option<telemetry::Snapshot>>(None);
-    let (restart_tx, restart_rx) = mpsc::channel::<String>(8);
+    let (action_tx, action_rx) = mpsc::channel::<RemoteActionRequest>(16);
 
     // ── polling task ──────────────────────────────────────────────────────────
     {
         let host = cfg.host.clone();
         let user = cfg.user.clone();
+        let transport = cfg.transport;
         let (port, interval, azure) = (cfg.port, cfg.interval, cfg.azure.clone());
         let tx = snap_tx.clone();
         tokio::spawn(async move {
             // restart_rx is consumed on first successful connection.
             // After a crash + reconnect the channel is gone — the stale banner
             // in the TUI signals to the user that a reconnect is in progress.
-            let _ = poll_loop(&host, port, &user, interval, &azure, &tx, restart_rx).await
+            let _ = poll_loop(
+                &host,
+                port,
+                &user,
+                transport,
+                interval,
+                &azure,
+                &tx,
+                action_rx,
+            ).await
                 .map_err(|e| error!("poll_loop exited: {e:#}"));
         });
     }
 
     // ── web server ────────────────────────────────────────────────────────────
     {
-        let state = web::WebState { snapshot_rx: snap_rx.clone() };
+        let state = web::WebState {
+            snapshot_rx: snap_rx.clone(),
+            action_tx: action_tx.clone(),
+        };
         let port  = cfg.web_port;
         tokio::spawn(async move {
             let addr = format!("127.0.0.1:{port}");
@@ -169,7 +222,7 @@ async fn main() -> Result<()> {
     }
 
     // ── TUI (blocks; tokio keeps polling + web tasks alive) ──────────────────
-    tokio::task::block_in_place(|| tui::run(&cfg.host, snap_rx, restart_tx))?;
+    tokio::task::block_in_place(|| tui::run(&cfg.host, snap_rx, action_tx))?;
 
     Ok(())
 }
@@ -178,12 +231,13 @@ async fn poll_loop(
     host: &str,
     port: u16,
     user: &str,
+    transport: ssh::Transport,
     docker_interval: Duration,
     azure_cfg: &Option<azure::AzureConfig>,
     tx: &watch::Sender<Option<telemetry::Snapshot>>,
-    mut restart_rx: mpsc::Receiver<String>,
+    mut action_rx: mpsc::Receiver<RemoteActionRequest>,
 ) -> Result<()> {
-    let mut session = ssh::TailscaleSession::connect(host, port, user).await?;
+    let mut session = ssh::RemoteSession::connect(host, port, user, transport).await?;
     let http = reqwest::Client::new();
 
     let mut azure_token: Option<String> = if azure_cfg.is_some() {
@@ -202,6 +256,11 @@ async fn poll_loop(
             _ = docker_tick.tick() => {
                 let mut snap = telemetry::collect_docker(host, &mut session).await?;
                 snap.azure_db = current_azure.clone();
+                snap.azure_db_name = azure_cfg.as_ref().map(|cfg| cfg.server_name.clone());
+                snap.azure_db_type = azure_cfg.as_ref().map(|cfg| match cfg.server_type {
+                    azure::ServerType::MySQL => "MySQL".to_string(),
+                    azure::ServerType::PostgreSQLFlexible => "PostgreSQL Flexible".to_string(),
+                });
                 if tx.send(Some(snap)).is_err() {
                     return Ok(()); // all receivers dropped — clean exit
                 }
@@ -223,17 +282,101 @@ async fn poll_loop(
                 }
             }
 
-            Some(name) = restart_rx.recv() => {
-                tracing::info!("restarting container: {name}");
-                match tokio::time::timeout(
-                    Duration::from_secs(30),
-                    session.exec(&format!("docker restart {name}")),
-                ).await {
-                    Ok(Ok(_))  => tracing::info!("{name} restarted"),
-                    Ok(Err(e)) => warn!("restart {name}: {e:#}"),
-                    Err(_)     => warn!("restart {name} timed out"),
-                }
+            Some(request) = action_rx.recv() => {
+                let result = match request.action {
+                    RemoteAction::Restart { name } => {
+                        tracing::debug!("restarting container: {name}");
+                        match tokio::time::timeout(
+                            Duration::from_secs(30),
+                            session.exec(&format!("docker restart {}", shell_quote(&name))),
+                        ).await {
+                            Ok(Ok(output)) => RemoteActionResult {
+                                title: format!("Restart: {name}"),
+                                output: if output.trim().is_empty() {
+                                    format!("{name} restarted")
+                                } else {
+                                    sanitize_for_tui(output)
+                                },
+                                is_error: false,
+                            },
+                            Ok(Err(e)) => RemoteActionResult {
+                                title: format!("Restart: {name}"),
+                                output: format!("{e:#}"),
+                                is_error: true,
+                            },
+                            Err(_) => RemoteActionResult {
+                                title: format!("Restart: {name}"),
+                                output: "restart timed out after 30s".to_string(),
+                                is_error: true,
+                            },
+                        }
+                    }
+
+                    RemoteAction::Logs { name } => {
+                        tracing::debug!("fetching logs for container: {name}");
+                        let command = format!("docker logs -n 50 {}", shell_quote(&name));
+                        match tokio::time::timeout(
+                            Duration::from_secs(30),
+                            session.exec(&command),
+                        ).await {
+                            Ok(Ok(output)) => RemoteActionResult {
+                                title: format!("Logs: {name} (last 50 lines)"),
+                                output: if output.trim().is_empty() {
+                                    "no log output returned".to_string()
+                                } else {
+                                    sanitize_for_tui(output)
+                                },
+                                is_error: false,
+                            },
+                            Ok(Err(e)) => RemoteActionResult {
+                                title: format!("Logs: {name}"),
+                                output: format!("{e:#}"),
+                                is_error: true,
+                            },
+                            Err(_) => RemoteActionResult {
+                                title: format!("Logs: {name}"),
+                                output: "log fetch timed out after 30s".to_string(),
+                                is_error: true,
+                            },
+                        }
+                    }
+
+                    RemoteAction::SystemDf => {
+                        tracing::debug!("fetching docker disk usage");
+                        match tokio::time::timeout(
+                            Duration::from_secs(20),
+                            session.exec("docker system df"),
+                        ).await {
+                            Ok(Ok(output)) => RemoteActionResult {
+                                title: "Docker Disk Usage".to_string(),
+                                output: sanitize_for_tui(output),
+                                is_error: false,
+                            },
+                            Ok(Err(e)) => RemoteActionResult {
+                                title: "Docker Disk Usage".to_string(),
+                                output: format!("{e:#}"),
+                                is_error: true,
+                            },
+                            Err(_) => RemoteActionResult {
+                                title: "Docker Disk Usage".to_string(),
+                                output: "docker system df timed out after 20s".to_string(),
+                                is_error: true,
+                            },
+                        }
+                    }
+                };
+
+                let _ = request.respond_to.send(result);
             }
         }
     }
+}
+
+fn shell_quote(value: &str) -> String {
+    let escaped = value.replace('\'', "'\"'\"'");
+    format!("'{escaped}'")
+}
+
+fn sanitize_for_tui(output: String) -> String {
+    output.replace("\r\n", "\n").replace('\r', "\n")
 }

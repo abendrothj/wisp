@@ -21,11 +21,21 @@ pub struct HostSection {
     pub port: u16,
     pub user: String,
     pub interval: u64,
+    #[serde(default = "default_transport")]
+    pub transport: String,
 }
+
+fn default_transport() -> String { "tailscale".into() }
 
 impl Default for HostSection {
     fn default() -> Self {
-        Self { address: String::new(), port: 22, user: "deploy".into(), interval: 5 }
+        Self {
+            address: String::new(),
+            port: 22,
+            user: "deploy".into(),
+            interval: 5,
+            transport: default_transport(),
+        }
     }
 }
 
@@ -83,6 +93,16 @@ impl Config {
             server_name: az.db_server.clone(),
             server_type: kind,
         })
+    }
+}
+
+impl HostSection {
+    pub fn transport(&self) -> crate::ssh::Transport {
+        if self.transport.eq_ignore_ascii_case("ssh") {
+            crate::ssh::Transport::Ssh
+        } else {
+            crate::ssh::Transport::Tailscale
+        }
     }
 }
 

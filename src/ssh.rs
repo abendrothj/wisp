@@ -2,10 +2,17 @@ use anyhow::{Context, Result, bail};
 use russh::{client, client::AuthResult, ChannelMsg};
 use ssh_key::PublicKey;
 use std::{sync::Arc, time::Duration};
-use tracing::info;
+use tokio::process::Command;
+use tracing::debug;
 
 const EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    Tailscale,
+    Ssh,
+}
 
 struct TailscaleHandler;
 
@@ -25,9 +32,36 @@ pub struct TailscaleSession {
     handle: client::Handle<TailscaleHandler>,
 }
 
+pub struct SshSession {
+    host: String,
+    port: u16,
+    user: String,
+}
+
+pub enum RemoteSession {
+    Tailscale(TailscaleSession),
+    Ssh(SshSession),
+}
+
+impl RemoteSession {
+    pub async fn connect(host: &str, port: u16, user: &str, transport: Transport) -> Result<Self> {
+        match transport {
+            Transport::Tailscale => Ok(Self::Tailscale(TailscaleSession::connect(host, port, user).await?)),
+            Transport::Ssh => Ok(Self::Ssh(SshSession::connect(host, port, user).await?)),
+        }
+    }
+
+    pub async fn exec(&mut self, command: &str) -> Result<String> {
+        match self {
+            Self::Tailscale(s) => s.exec(command).await,
+            Self::Ssh(s) => s.exec(command).await,
+        }
+    }
+}
+
 impl TailscaleSession {
     pub async fn connect(host: &str, port: u16, user: &str) -> Result<Self> {
-        info!("connecting to {}:{} as '{}'", host, port, user);
+        debug!("connecting to {}:{} as '{}'", host, port, user);
 
         let config = Arc::new(client::Config::default());
 
@@ -45,7 +79,7 @@ impl TailscaleSession {
             .context("none auth failed — is `tailscale ssh` enabled on the remote host?")?
         {
             AuthResult::Success => {
-                info!("authenticated via Tailscale mesh identity");
+                debug!("authenticated via Tailscale mesh identity");
             }
             AuthResult::Failure { remaining_methods, .. } => {
                 bail!(
@@ -89,5 +123,54 @@ impl TailscaleSession {
         }
 
         Ok(String::from_utf8_lossy(&stdout).into_owned())
+    }
+}
+
+impl SshSession {
+    pub async fn connect(host: &str, port: u16, user: &str) -> Result<Self> {
+        debug!("connecting over standard ssh to {}:{} as '{}'", host, port, user);
+        let session = Self {
+            host: host.to_string(),
+            port,
+            user: user.to_string(),
+        };
+
+        let _ = session.exec("true").await.with_context(|| {
+            format!(
+                "failed to establish standard ssh session to {}@{}:{}",
+                session.user, session.host, session.port
+            )
+        })?;
+
+        Ok(session)
+    }
+
+    pub async fn exec(&self, command: &str) -> Result<String> {
+        let mut cmd = Command::new("ssh");
+        cmd.args([
+            "-p",
+            &self.port.to_string(),
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            &format!("{}@{}", self.user, self.host),
+            command,
+        ]);
+
+        let output = tokio::time::timeout(EXEC_TIMEOUT, cmd.output())
+            .await
+            .with_context(|| format!("SSH exec timed out: `{command}`"))?
+            .context("failed to run local `ssh` command")?;
+
+        if !output.status.success() {
+            bail!(
+                "remote command `{}` failed: {}",
+                command,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 }

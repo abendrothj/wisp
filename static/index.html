@@ -68,7 +68,11 @@
       letter-spacing: 0.08em;
       color: var(--muted);
       border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
     }
+    .title-actions { display: flex; gap: 8px; }
 
     /* ── container table ── */
     table { width: 100%; border-collapse: collapse; }
@@ -88,6 +92,23 @@
     .cpu-hot  { color: var(--red); font-weight: 700; }
     .healthy  { color: var(--green); }
     .unhealthy{ color: var(--red); }
+    .actions { display: flex; gap: 6px; }
+
+    /* ── buttons ── */
+    button {
+      border: 1px solid var(--border);
+      background: #1d2430;
+      color: var(--text);
+      border-radius: 4px;
+      padding: 3px 8px;
+      cursor: pointer;
+      font: inherit;
+      font-size: 11px;
+    }
+    button:hover { border-color: var(--blue); color: var(--blue); }
+    button.warn:hover { border-color: var(--yellow); color: var(--yellow); }
+    button.danger:hover { border-color: var(--red); color: var(--red); }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
 
     /* ── azure panel ── */
     .metric {
@@ -101,6 +122,45 @@
     .bar-fill { height: 100%; border-radius: 2px; transition: width 0.6s ease; }
 
     .placeholder { padding: 20px 14px; color: var(--muted); text-align: center; }
+
+    /* ── modal ── */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.55);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      z-index: 30;
+    }
+    .modal {
+      width: min(960px, 95vw);
+      height: min(75vh, 700px);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      overflow: hidden;
+    }
+    .modal-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .modal-head strong { color: var(--text); font-size: 13px; }
+    .modal-body {
+      padding: 10px 12px;
+      white-space: pre-wrap;
+      overflow: auto;
+      font-size: 12px;
+      line-height: 1.35;
+    }
   </style>
 </head>
 <body>
@@ -117,7 +177,12 @@
 
   <main>
     <div class="card">
-      <div class="card-title">containers</div>
+      <div class="card-title">
+        <span>containers</span>
+        <div class="title-actions">
+          <button id="diskBtn" class="warn">disk usage</button>
+        </div>
+      </div>
       <div id="containers"><div class="placeholder">waiting for data…</div></div>
     </div>
 
@@ -127,10 +192,37 @@
     </div>
   </main>
 
+  <div id="modalBackdrop" class="modal-backdrop">
+    <div class="modal">
+      <div class="modal-head">
+        <strong id="modalTitle">Action Output</strong>
+        <button id="modalClose">close</button>
+      </div>
+      <pre id="modalBody" class="modal-body"></pre>
+    </div>
+  </div>
+
   <script>
     const dot     = document.getElementById('dot');
     const hostEl  = document.getElementById('host');
     const refresh = document.getElementById('refresh');
+    const diskBtn = document.getElementById('diskBtn');
+    const modalBackdrop = document.getElementById('modalBackdrop');
+    const modalTitle = document.getElementById('modalTitle');
+    const modalBody = document.getElementById('modalBody');
+    const modalClose = document.getElementById('modalClose');
+
+    modalClose.addEventListener('click', () => hideModal());
+    modalBackdrop.addEventListener('click', (e) => {
+      if (e.target === modalBackdrop) hideModal();
+    });
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') hideModal();
+    });
+
+    diskBtn.addEventListener('click', async () => {
+      await runAction('/api/action/system-df');
+    });
 
     let lastSecs = null;
     setInterval(() => {
@@ -141,7 +233,8 @@
     }, 1000);
 
     function connect() {
-      const ws = new WebSocket(`ws://${location.host}/ws`);
+      const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${protocol}://${location.host}/ws`);
 
       ws.onopen = () => {
         dot.className = 'dot live';
@@ -183,6 +276,7 @@
           const s    = statsIdx[c.Names] || {};
           const cpu  = s.CPUPerc  || '–';
           const mem  = s.MemUsage || '–';
+          const net  = s.NetIO    || '–';
           const sc   = c.State === 'running' ? 'running' : 'stopped';
           const stc  = c.Status.includes('unhealthy') ? 'unhealthy'
                      : c.Status.includes('healthy')   ? 'healthy' : '';
@@ -191,25 +285,42 @@
             <td class="${sc}">${c.State}</td>
             <td class="${cpuClass(cpu)}">${cpu}</td>
             <td>${mem}</td>
+            <td>${net}</td>
             <td class="${stc}">${c.Status}</td>
+            <td>
+              <div class="actions">
+                <button class="warn" onclick="wispLogs(${JSON.stringify(c.Names)})">logs</button>
+                <button class="danger" onclick="wispRestart(${JSON.stringify(c.Names)})">restart</button>
+              </div>
+            </td>
           </tr>`;
         }
         document.getElementById('containers').innerHTML =
           `<table><thead><tr>
-            <th>Container</th><th>State</th><th>CPU%</th><th>Mem</th><th>Status</th>
+            <th>Container</th><th>State</th><th>CPU%</th><th>Mem</th><th>Net I/O</th><th>Status</th><th>Actions</th>
           </tr></thead><tbody>${rows}</tbody></table>`;
       }
 
       /* azure */
-      if (!snap.azure_db) return;
+      if (!snap.azure_db) {
+        document.getElementById('azure').innerHTML = '<div class="placeholder">not configured</div>';
+        return;
+      }
       const db = snap.azure_db;
+      const dbName = snap.azure_db_name || '(unknown)';
+      const dbType = snap.azure_db_type || '(unknown)';
       const metrics = [
         { label: 'CPU',         val: db.cpu_percent,     unit: '%' },
         { label: 'Memory',      val: db.memory_percent,  unit: '%' },
         { label: 'Storage',     val: db.storage_percent, unit: '%' },
-        { label: 'Connections', val: db.connections,     unit: ''  },
+        { label: 'ACT CONN',    val: db.connections,     unit: ''  },
       ];
-      let html = '';
+      let html = `<div class="metric"><div>
+        <div class="metric-label">DB</div><div class="metric-val">${dbName}</div>
+      </div></div>
+      <div class="metric"><div>
+        <div class="metric-label">Type</div><div class="metric-val" style="font-size:13px">${dbType}</div>
+      </div></div>`;
       for (const m of metrics) {
         const isPct  = m.unit === '%';
         const disp   = isPct ? `${m.val.toFixed(1)}%` : m.val.toFixed(0);
@@ -223,6 +334,41 @@
         </div>`;
       }
       document.getElementById('azure').innerHTML = html;
+    }
+
+    async function runAction(url, payload) {
+      showModal('Running action…', 'Please wait...');
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: payload ? JSON.stringify(payload) : undefined,
+        });
+        const data = await res.json();
+        showModal(data.title || 'Action Output', data.output || '', !!data.is_error);
+      } catch (err) {
+        showModal('Action Error', String(err), true);
+      }
+    }
+
+    window.wispLogs = async function(name) {
+      await runAction('/api/action/logs', { name });
+    };
+
+    window.wispRestart = async function(name) {
+      await runAction('/api/action/restart', { name });
+    };
+
+    function showModal(title, output, isError = false) {
+      modalTitle.textContent = title;
+      modalTitle.style.color = isError ? 'var(--red)' : 'var(--text)';
+      modalBody.textContent = output;
+      modalBackdrop.style.display = 'flex';
+      modalBody.scrollTop = 0;
+    }
+
+    function hideModal() {
+      modalBackdrop.style.display = 'none';
     }
 
     connect();
