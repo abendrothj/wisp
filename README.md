@@ -57,7 +57,6 @@ Interactive shell sessions are intentionally out of scope for reliability. Use d
 
 ## Requirements
 
-- Rust toolchain (edition 2024)
 - Docker on the target host
 - One transport mode:
   - **Default (recommended):** Tailscale SSH
@@ -67,25 +66,91 @@ Interactive shell sessions are intentionally out of scope for reliability. Use d
   - Azure CLI (`az`) logged in, or
   - `AZURE_ACCESS_TOKEN` environment variable
 
+Rust is only required when building from source.
+
 ## Quickstart
 
-### 1) Clone and build
+### 1) Download from GitHub Releases
+
+Release page:
+- https://github.com/abendrothj/wisp/releases
+
+Pick the artifact for your platform:
+- macOS Intel: `wisp-vX.Y.Z-x86_64-apple-darwin.tar.gz`
+- macOS Apple Silicon: `wisp-vX.Y.Z-aarch64-apple-darwin.tar.gz`
+- Linux x86_64: `wisp-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`
+- Windows x86_64: `wisp-vX.Y.Z-x86_64-pc-windows-msvc.zip`
+
+### 2) Verify checksum (recommended)
+
+Download `SHA256SUMS` from the same release and verify your archive:
+
+```bash
+shasum -a 256 <artifact-file>
+```
+
+Compare output with the matching line in `SHA256SUMS`.
+
+### 3) Install binary
+
+macOS (Apple Silicon):
+
+```bash
+VERSION=v1.0.0
+curl -LO "https://github.com/abendrothj/wisp/releases/download/${VERSION}/wisp-${VERSION}-aarch64-apple-darwin.tar.gz"
+tar -xzf "wisp-${VERSION}-aarch64-apple-darwin.tar.gz"
+chmod +x wisp
+sudo mv wisp /usr/local/bin/wisp
+```
+
+macOS (Intel):
+
+```bash
+VERSION=v1.0.0
+curl -LO "https://github.com/abendrothj/wisp/releases/download/${VERSION}/wisp-${VERSION}-x86_64-apple-darwin.tar.gz"
+tar -xzf "wisp-${VERSION}-x86_64-apple-darwin.tar.gz"
+chmod +x wisp
+sudo mv wisp /usr/local/bin/wisp
+```
+
+Linux (x86_64):
+
+```bash
+VERSION=v1.0.0
+curl -LO "https://github.com/abendrothj/wisp/releases/download/${VERSION}/wisp-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+tar -xzf "wisp-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+chmod +x wisp
+sudo mv wisp /usr/local/bin/wisp
+```
+
+Windows (PowerShell):
+
+```powershell
+$Version = "v1.0.0"
+Invoke-WebRequest -Uri "https://github.com/abendrothj/wisp/releases/download/$Version/wisp-$Version-x86_64-pc-windows-msvc.zip" -OutFile "wisp.zip"
+Expand-Archive -Path "wisp.zip" -DestinationPath "." -Force
+New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\bin" | Out-Null
+Move-Item -Force ".\wisp.exe" "$env:USERPROFILE\bin\wisp.exe"
+```
+
+### 4) Run with Tailscale (default)
+
+```bash
+wisp -H <tailscale-ip> -u <user>
+```
+
+### 5) Open web dashboard (optional)
+
+By default: `http://127.0.0.1:8080`
+
+## Build from source (optional)
 
 ```bash
 git clone <your-repo-url>
 cd wisp
 cargo build
-```
-
-### 2) Run with Tailscale (default)
-
-```bash
 cargo run -- -H <tailscale-ip> -u <user>
 ```
-
-### 3) Open web dashboard (optional)
-
-By default: `http://127.0.0.1:8080`
 
 ## Transport modes
 
@@ -97,7 +162,7 @@ By default: `http://127.0.0.1:8080`
 ### SSH mode (`--ssh`)
 
 ```bash
-cargo run -- --ssh -H <host> -u <user> [-p <port>]
+wisp --ssh -H <host> -u <user> [-p <port>]
 ```
 
 Use only when Tailscale is not available.
@@ -110,7 +175,7 @@ Use only when Tailscale is not available.
 Use the guided setup to discover subscription + DB server and save config:
 
 ```bash
-cargo run -- --setup
+wisp --setup
 ```
 
 Global config path:
@@ -214,7 +279,7 @@ Runtime logging is off by default to keep the UI clean.
 Enable debug logs:
 
 ```bash
-RUST_LOG=wisp=debug cargo run -- -H <tailscale-ip>
+RUST_LOG=wisp=debug wisp -H <tailscale-ip>
 ```
 
 ## Architecture
@@ -254,6 +319,36 @@ Planned:
 - Automatic profile resolution from config when no explicit flags are provided
 - Optional first-run bootstrap flow to create initial profile
 - Keep advanced flags available, but make them optional for daily use
+
+### More services (multi-cloud)
+
+Goal: make `wisp` a practical cross-cloud control plane while staying lightweight.
+
+Planned:
+- AWS support (first target):
+  - ECS service/task health + rollout status
+  - RDS metrics (CPU, memory, storage, connections)
+  - CloudWatch-backed service telemetry summaries
+- Expanded Azure coverage beyond DB metrics:
+  - App Service / Container Apps health and restart actions
+  - AKS node + workload high-level telemetry
+- Additional providers:
+  - GCP Cloud SQL + Cloud Run telemetry/actions
+  - Optional DigitalOcean/Linode basic compute monitoring
+
+### Feature expansion
+
+Goal: increase operator leverage without turning `wisp` into dashboard bloat.
+
+Planned:
+- Alerts + thresholds in config (CPU/memory/storage/connection guardrails)
+- Event timeline (container restarts, deploys, failures, prune operations)
+- Safer action controls (dry-run previews, optional approval prompts per action class)
+- Better web parity and workflows:
+  - live log streaming mode
+  - richer inspect rendering (structured sections)
+  - keyboard shortcuts matching TUI behavior
+- Extensible service adapters so new providers can be added with minimal core changes
 
 ## Release process
 
