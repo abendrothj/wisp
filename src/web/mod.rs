@@ -34,6 +34,7 @@ pub fn router(state: WebState) -> Router {
         .route("/api/action/restart", post(restart_handler))
         .route("/api/action/logs", post(logs_handler))
         .route("/api/action/inspect", post(inspect_handler))
+        .route("/api/action/prune", post(prune_handler))
         .route("/api/action/system-df", post(system_df_handler))
         .with_state(state)
 }
@@ -87,6 +88,10 @@ async fn inspect_handler(
 
 async fn system_df_handler(State(state): State<WebState>) -> impl IntoResponse {
     run_action(state.action_tx.clone(), RemoteAction::SystemDf).await
+}
+
+async fn prune_handler(State(state): State<WebState>) -> impl IntoResponse {
+    run_action(state.action_tx.clone(), RemoteAction::Prune).await
 }
 
 async fn run_action(action_tx: mpsc::Sender<RemoteActionRequest>, action: RemoteAction) -> impl IntoResponse {

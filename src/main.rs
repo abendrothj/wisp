@@ -21,6 +21,7 @@ pub enum RemoteAction {
     Restart { name: String },
     Logs { name: String },
     Inspect { name: String },
+    Prune,
     SystemDf,
 }
 
@@ -225,7 +226,14 @@ async fn main() -> Result<()> {
     }
 
     // ── TUI (blocks; tokio keeps polling + web tasks alive) ──────────────────
-    tokio::task::block_in_place(|| tui::run(&cfg.host, snap_rx, action_tx))?;
+    let shell_target = tui::ShellTarget {
+        host: cfg.host.clone(),
+        port: cfg.port,
+        user: cfg.user.clone(),
+        transport: cfg.transport,
+    };
+
+    tokio::task::block_in_place(|| tui::run(&cfg.host, snap_rx, action_tx, shell_target))?;
 
     Ok(())
 }
@@ -444,6 +452,30 @@ async fn poll_loop(
                             Err(_) => RemoteActionResult {
                                 title: "Docker Disk Usage".to_string(),
                                 output: "docker system df timed out after 20s".to_string(),
+                                is_error: true,
+                            },
+                        }
+                    }
+
+                    RemoteAction::Prune => {
+                        tracing::debug!("pruning stopped containers");
+                        match tokio::time::timeout(
+                            Duration::from_secs(45),
+                            session.exec("docker container prune -f"),
+                        ).await {
+                            Ok(Ok(output)) => RemoteActionResult {
+                                title: "Prune: stopped containers".to_string(),
+                                output: sanitize_for_tui(output),
+                                is_error: false,
+                            },
+                            Ok(Err(e)) => RemoteActionResult {
+                                title: "Prune: stopped containers".to_string(),
+                                output: format!("{e:#}"),
+                                is_error: true,
+                            },
+                            Err(_) => RemoteActionResult {
+                                title: "Prune: stopped containers".to_string(),
+                                output: "docker container prune timed out after 45s".to_string(),
                                 is_error: true,
                             },
                         }

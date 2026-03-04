@@ -16,8 +16,11 @@ Tailscale-native, agentless infrastructure control plane.
   - Start container
   - Stop container
   - Restart container
+  - Inspect container (`docker inspect <name>`)
+  - Open shell in container (`docker exec -it <name> /bin/sh`)
   - View logs (`docker logs -n 50 <name>`)
   - Disk usage (`docker system df`)
+  - Guarded prune of stopped containers (`docker container prune -f`)
 
 These actions are available in both TUI and web dashboard.
 
@@ -38,6 +41,7 @@ For Azure Database for PostgreSQL Flexible Server or MySQL Flexible Server:
 - Tailscale with SSH enabled between your machine and target host
 - Docker installed on target host
 - Optional standard SSH client (`ssh`) only if using `--ssh` mode
+- `tailscale` CLI if using Tailscale mode with TUI shell escape (`s`)
 - Optional Azure monitoring:
   - Azure CLI (`az`) installed and logged in, or `AZURE_ACCESS_TOKEN`
 
@@ -100,8 +104,10 @@ Container actions:
 - `x`: stop selected container
 - `r`: restart selected container
 - `Enter`: inspect selected container (`docker inspect <name>`)
+- `s`: open interactive shell in selected container (`docker exec -it <name> /bin/sh`)
 - `l`: open log viewer for selected container (last 50 lines)
 - `d`: open Docker disk usage (`docker system df`)
+- `p` then `p` (within 5s): guarded prune of stopped containers
 
 Popup controls:
 - `Esc` / `Enter` / `q`: close popup
@@ -113,6 +119,7 @@ Popup controls:
 ## Web controls
 
 - `disk usage` button: runs `docker system df`
+- `prune stopped` button (with confirm): runs `docker container prune -f`
 - Per-container `start` button: runs `docker start <name>`
 - Per-container `stop` button: runs `docker stop <name>`
 - Per-container `inspect` button: runs `docker inspect <name>`

@@ -9,10 +9,12 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend, widgets::TableState};
 use std::{
     io,
+    process::{Command, Stdio},
     time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
+use crate::ssh::Transport;
 use crate::telemetry::Snapshot;
 use crate::{RemoteAction, RemoteActionRequest, RemoteActionResult};
 
@@ -29,6 +31,7 @@ pub struct App {
     pub popup: Option<Popup>,
     pub pending_result: Option<oneshot::Receiver<RemoteActionResult>>,
     pub pending_mode: Option<PendingMode>,
+    pub prune_guard_until: Option<Instant>,
 }
 
 pub enum PendingMode {
@@ -44,6 +47,14 @@ pub struct Popup {
     pub scroll: u16,
 }
 
+#[derive(Clone)]
+pub struct ShellTarget {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub transport: Transport,
+}
+
 impl App {
     fn new() -> Self {
         Self {
@@ -55,6 +66,7 @@ impl App {
             popup: None,
             pending_result: None,
             pending_mode: None,
+            prune_guard_until: None,
         }
     }
 
@@ -106,6 +118,7 @@ pub fn run(
     host: &str,
     mut rx: watch::Receiver<Option<Snapshot>>,
     action_tx: mpsc::Sender<RemoteActionRequest>,
+    shell_target: ShellTarget,
 ) -> Result<()> {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -124,6 +137,7 @@ pub fn run(
         host,
         &mut rx,
         &action_tx,
+        &shell_target,
     );
 
     restore_terminal()?;
@@ -136,6 +150,7 @@ fn run_loop(
     host: &str,
     rx: &mut watch::Receiver<Option<Snapshot>>,
     action_tx: &mpsc::Sender<RemoteActionRequest>,
+    shell_target: &ShellTarget,
 ) -> Result<()> {
     let tick = Duration::from_millis(16);
 
@@ -150,6 +165,10 @@ fn run_loop(
         // Clear expired pending action messages (show for 8 s).
         if app.pending_action.as_ref().map(|(_, t)| t.elapsed() > Duration::from_secs(8)).unwrap_or(false) {
             app.pending_action = None;
+        }
+
+        if app.prune_guard_until.map(|t| t <= Instant::now()).unwrap_or(false) {
+            app.prune_guard_until = None;
         }
 
         if let Some(rx) = app.pending_result.as_mut() {
@@ -370,6 +389,61 @@ fn run_loop(
                             }
                         }
 
+                        KeyCode::Char('p') => {
+                            let now = Instant::now();
+                            if app.prune_guard_until.map(|until| until > now).unwrap_or(false) {
+                                app.prune_guard_until = None;
+                                let (tx, rx) = oneshot::channel();
+                                let req = RemoteActionRequest {
+                                    action: RemoteAction::Prune,
+                                    respond_to: tx,
+                                };
+                                if action_tx.blocking_send(req).is_ok() {
+                                    app.pending_result = Some(rx);
+                                    app.pending_mode = Some(PendingMode::Popup);
+                                    app.popup = Some(Popup {
+                                        title: "Prune: stopped containers".to_string(),
+                                        body: "running docker container prune -f…".to_string(),
+                                        is_error: false,
+                                        loading: true,
+                                        scroll: 0,
+                                    });
+                                }
+                            } else {
+                                app.prune_guard_until = Some(now + Duration::from_secs(5));
+                                app.pending_action = Some((
+                                    "guarded prune: press [p] again within 5s".to_string(),
+                                    Instant::now(),
+                                ));
+                            }
+                        }
+
+                        KeyCode::Char('s') => {
+                            if let Some(name) = app.selected_name() {
+                                app.pending_action = Some((
+                                    format!("opening shell in {}…", name),
+                                    Instant::now(),
+                                ));
+                                match open_container_shell(terminal, shell_target, &name) {
+                                    Ok(()) => {
+                                        app.pending_action = Some((
+                                            format!("shell closed for {}", name),
+                                            Instant::now(),
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        app.popup = Some(Popup {
+                                            title: format!("Shell: {name}"),
+                                            body: format!("{e:#}"),
+                                            is_error: true,
+                                            loading: false,
+                                            scroll: 0,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+
                         _ => {}
                     }
                 }
@@ -403,4 +477,56 @@ fn popup_scroll_up(app: &mut App, amount: u16) {
     if let Some(popup) = app.popup.as_mut() {
         popup.scroll = popup.scroll.saturating_sub(amount);
     }
+}
+
+fn open_container_shell(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    target: &ShellTarget,
+    name: &str,
+) -> Result<()> {
+    restore_terminal()?;
+
+    let command = format!("docker exec -it {} /bin/sh", shell_quote(name));
+    let mut process = match target.transport {
+        Transport::Tailscale => {
+            let mut cmd = Command::new("tailscale");
+            cmd.args([
+                "ssh",
+                &format!("{}@{}", target.user, target.host),
+                "--",
+                &command,
+            ]);
+            cmd
+        }
+        Transport::Ssh => {
+            let mut cmd = Command::new("ssh");
+            cmd.args([
+                "-p",
+                &target.port.to_string(),
+                &format!("{}@{}", target.user, target.host),
+                &command,
+            ]);
+            cmd
+        }
+    };
+
+    let status = process
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status();
+
+    setup_terminal()?;
+    terminal.clear()?;
+
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => anyhow::bail!("shell command exited with status {s}"),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    let escaped = value.replace('\'', "'\"'\"'");
+    format!("'{escaped}'")
 }
