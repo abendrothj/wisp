@@ -1,8 +1,11 @@
 mod ssh;
 mod telemetry;
+mod tui;
 
 use anyhow::Result;
 use clap::Parser;
+use std::{sync::mpsc, time::Duration};
+use tracing::error;
 
 /// Lightcontain — Tailscale-native, agentless infrastructure control plane
 #[derive(Parser, Debug)]
@@ -19,55 +22,73 @@ struct Args {
     /// Remote user to connect as
     #[arg(short, long, default_value = "deploy")]
     user: String,
+
+    /// Telemetry poll interval in seconds
+    #[arg(short = 'i', long, default_value_t = 5)]
+    interval: u64,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Log to a file so we don't corrupt the TUI — enabled via RUST_LOG env var.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("lightcontain=info".parse()?),
         )
+        .with_writer(|| {
+            // Write logs to stderr; crossterm's alternate screen hides them.
+            std::io::stderr()
+        })
         .init();
 
     let args = Args::parse();
+    let interval = Duration::from_secs(args.interval);
 
-    let mut session = ssh::TailscaleSession::connect(&args.host, args.port, &args.user).await?;
-    let snapshot = telemetry::collect(&args.host, &mut session).await?;
+    let (tx, rx) = mpsc::channel::<telemetry::Snapshot>();
 
-    print_snapshot(&snapshot);
+    // SSH polling task — runs on the tokio thread pool.
+    // Reconnects automatically on error.
+    let host = args.host.clone();
+    let user = args.user.clone();
+    let port = args.port;
+    tokio::spawn(async move {
+        loop {
+            match poll_loop(&host, port, &user, &tx, interval).await {
+                Ok(()) => break, // channel closed (TUI exited) — clean shutdown
+                Err(e) => {
+                    error!("polling error: {e:#}, reconnecting in 5s");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+        }
+    });
+
+    // Run the TUI on the current thread.
+    // block_in_place lets tokio keep running the polling task above.
+    tokio::task::block_in_place(|| tui::run(&args.host, rx))?;
 
     Ok(())
 }
 
-fn print_snapshot(snapshot: &telemetry::Snapshot) {
-    println!("\n  host: {}\n", snapshot.host);
+/// Connect once, poll until the channel is closed or an error occurs.
+async fn poll_loop(
+    host: &str,
+    port: u16,
+    user: &str,
+    tx: &mpsc::Sender<telemetry::Snapshot>,
+    interval: Duration,
+) -> Result<()> {
+    let mut session = ssh::TailscaleSession::connect(host, port, user).await?;
 
-    // Build a stats lookup by container name for the joined display
-    let stats_map: std::collections::HashMap<&str, &telemetry::docker::ContainerStats> = snapshot
-        .stats
-        .iter()
-        .map(|s| (s.name.as_str(), s))
-        .collect();
+    loop {
+        let snapshot = telemetry::collect(host, &mut session).await?;
 
-    // Header
-    println!(
-        "  {:<24} {:<10} {:<8} {:<16} {:<20}",
-        "CONTAINER", "STATE", "CPU", "MEM", "STATUS"
-    );
-    println!("  {}", "─".repeat(82));
+        // If the receiver (TUI) has dropped, return Ok to signal clean exit.
+        if tx.send(snapshot).is_err() {
+            return Ok(());
+        }
 
-    for c in &snapshot.containers {
-        let (cpu, mem) = stats_map
-            .get(c.names.as_str())
-            .map(|s| (s.cpu_perc.as_str(), s.mem_usage.as_str()))
-            .unwrap_or(("–", "–"));
-
-        println!(
-            "  {:<24} {:<10} {:<8} {:<16} {:<20}",
-            c.names, c.state, cpu, mem, c.status
-        );
+        tokio::time::sleep(interval).await;
     }
-
-    println!();
 }

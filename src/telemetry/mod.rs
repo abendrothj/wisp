@@ -9,6 +9,7 @@ use crate::ssh::TailscaleSession;
 /// A point-in-time snapshot of all telemetry from a single host.
 #[derive(Debug)]
 pub struct Snapshot {
+    #[allow(dead_code)] // used by Phase 4 web UI
     pub host: String,
     pub containers: Vec<ContainerInfo>,
     pub stats: Vec<ContainerStats>,
