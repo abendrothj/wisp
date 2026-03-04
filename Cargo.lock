@@ -1223,6 +1223,8 @@ dependencies = [
  "clap",
  "internal-russh-forked-ssh-key",
  "russh",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
