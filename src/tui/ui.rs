@@ -91,7 +91,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     frame.render_widget(table_block, area);
     let table_area = area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
 
-    let header = Row::new(["CONTAINER", "STATE", "CPU%", "MEM", "NET I/O", "STATUS"].map(|h| {
+    let header = Row::new(["CONTAINER", "STATE", "HEALTH", "CPU%", "MEM", "NET I/O", "STATUS"].map(|h| {
         Cell::from(h).style(
             Style::default()
                 .fg(Color::White)
@@ -123,6 +123,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         rows,
         [
             Constraint::Length(26),
+            Constraint::Length(10),
             Constraint::Length(10),
             Constraint::Length(8),
             Constraint::Length(18),
@@ -167,11 +168,20 @@ fn build_row<'a>(c: &'a ContainerInfo, stats: Option<&'a ContainerStats>, zebra:
         Style::default().fg(Color::Yellow)
     };
 
+    let health = health_label(&c.status);
+    let health_style = match health {
+        "healthy" => Style::default().fg(Color::Green),
+        "unhealthy" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        "starting" => Style::default().fg(Color::Yellow),
+        _ => Style::default().fg(Color::DarkGray),
+    };
+
     let state_chip = if c.state == "running" { "● running" } else { "● stopped" };
 
     Row::new(vec![
         Cell::from(c.names.as_str()),
         Cell::from(state_chip).style(state_style),
+        Cell::from(health).style(health_style),
         Cell::from(cpu_str).style(cpu_style),
         Cell::from(mem_str),
         Cell::from(net_str),
@@ -182,6 +192,19 @@ fn build_row<'a>(c: &'a ContainerInfo, stats: Option<&'a ContainerStats>, zebra:
     } else {
         Style::default().bg(Color::Black)
     })
+}
+
+fn health_label(status: &str) -> &'static str {
+    let s = status.to_ascii_lowercase();
+    if s.contains("unhealthy") {
+        "unhealthy"
+    } else if s.contains("healthy") {
+        "healthy"
+    } else if s.contains("health: starting") || s.contains("starting") {
+        "starting"
+    } else {
+        "none"
+    }
 }
 
 // ── azure sidebar ─────────────────────────────────────────────────────────────
@@ -310,6 +333,8 @@ fn draw_footer(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             Span::styled("• ", Style::default().fg(Color::DarkGray)),
             Span::styled("[r]", Style::default().fg(Color::Yellow)),
             Span::styled(" restart  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("[enter]", Style::default().fg(Color::Yellow)),
+            Span::styled(" inspect  ", Style::default().fg(Color::DarkGray)),
             Span::styled("[l]", Style::default().fg(Color::Yellow)),
             Span::styled(" logs  ", Style::default().fg(Color::DarkGray)),
             Span::styled("[d]", Style::default().fg(Color::Yellow)),

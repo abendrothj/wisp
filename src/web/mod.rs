@@ -31,6 +31,7 @@ pub fn router(state: WebState) -> Router {
         .route("/ws", get(ws::handler))
         .route("/api/action/restart", post(restart_handler))
         .route("/api/action/logs", post(logs_handler))
+        .route("/api/action/inspect", post(inspect_handler))
         .route("/api/action/system-df", post(system_df_handler))
         .with_state(state)
 }
@@ -59,6 +60,13 @@ async fn logs_handler(
     Json(req): Json<NameActionRequest>,
 ) -> impl IntoResponse {
     run_action(state.action_tx.clone(), RemoteAction::Logs { name: req.name }).await
+}
+
+async fn inspect_handler(
+    State(state): State<WebState>,
+    Json(req): Json<NameActionRequest>,
+) -> impl IntoResponse {
+    run_action(state.action_tx.clone(), RemoteAction::Inspect { name: req.name }).await
 }
 
 async fn system_df_handler(State(state): State<WebState>) -> impl IntoResponse {

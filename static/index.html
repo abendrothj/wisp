@@ -260,6 +260,14 @@
       return 'var(--green)';
     }
 
+    function healthLabel(status) {
+      const s = String(status || '').toLowerCase();
+      if (s.includes('unhealthy')) return 'unhealthy';
+      if (s.includes('healthy')) return 'healthy';
+      if (s.includes('health: starting') || s.includes('starting')) return 'starting';
+      return 'none';
+    }
+
     function render(snap) {
       hostEl.textContent = snap.host;
       lastSecs = snap.collected_at;
@@ -277,18 +285,23 @@
           const cpu  = s.CPUPerc  || '–';
           const mem  = s.MemUsage || '–';
           const net  = s.NetIO    || '–';
+          const health = healthLabel(c.Status);
+          const hc = health === 'healthy' ? 'healthy'
+                   : health === 'unhealthy' ? 'unhealthy' : '';
           const sc   = c.State === 'running' ? 'running' : 'stopped';
           const stc  = c.Status.includes('unhealthy') ? 'unhealthy'
                      : c.Status.includes('healthy')   ? 'healthy' : '';
           rows += `<tr>
             <td class="name">${c.Names}</td>
             <td class="${sc}">${c.State}</td>
+            <td class="${hc}">${health}</td>
             <td class="${cpuClass(cpu)}">${cpu}</td>
             <td>${mem}</td>
             <td>${net}</td>
             <td class="${stc}">${c.Status}</td>
             <td>
               <div class="actions">
+                <button onclick="wispInspect(${JSON.stringify(c.Names)})">inspect</button>
                 <button class="warn" onclick="wispLogs(${JSON.stringify(c.Names)})">logs</button>
                 <button class="danger" onclick="wispRestart(${JSON.stringify(c.Names)})">restart</button>
               </div>
@@ -297,7 +310,7 @@
         }
         document.getElementById('containers').innerHTML =
           `<table><thead><tr>
-            <th>Container</th><th>State</th><th>CPU%</th><th>Mem</th><th>Net I/O</th><th>Status</th><th>Actions</th>
+            <th>Container</th><th>State</th><th>Health</th><th>CPU%</th><th>Mem</th><th>Net I/O</th><th>Status</th><th>Actions</th>
           </tr></thead><tbody>${rows}</tbody></table>`;
       }
 
@@ -353,6 +366,10 @@
 
     window.wispLogs = async function(name) {
       await runAction('/api/action/logs', { name });
+    };
+
+    window.wispInspect = async function(name) {
+      await runAction('/api/action/inspect', { name });
     };
 
     window.wispRestart = async function(name) {

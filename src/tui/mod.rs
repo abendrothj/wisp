@@ -283,6 +283,27 @@ fn run_loop(
                             }
                         }
 
+                        KeyCode::Enter => {
+                            if let Some(name) = app.selected_name() {
+                                let (tx, rx) = oneshot::channel();
+                                let req = RemoteActionRequest {
+                                    action: RemoteAction::Inspect { name: name.clone() },
+                                    respond_to: tx,
+                                };
+                                if action_tx.blocking_send(req).is_ok() {
+                                    app.pending_result = Some(rx);
+                                    app.pending_mode = Some(PendingMode::Popup);
+                                    app.popup = Some(Popup {
+                                        title: format!("Inspect: {name}"),
+                                        body: "running docker inspect…".to_string(),
+                                        is_error: false,
+                                        loading: true,
+                                        scroll: 0,
+                                    });
+                                }
+                            }
+                        }
+
                         KeyCode::Char('d') => {
                             let (tx, rx) = oneshot::channel();
                             let req = RemoteActionRequest {

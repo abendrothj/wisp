@@ -18,6 +18,7 @@ use config::Config;
 pub enum RemoteAction {
     Restart { name: String },
     Logs { name: String },
+    Inspect { name: String },
     SystemDf,
 }
 
@@ -336,6 +337,31 @@ async fn poll_loop(
                             Err(_) => RemoteActionResult {
                                 title: format!("Logs: {name}"),
                                 output: "log fetch timed out after 30s".to_string(),
+                                is_error: true,
+                            },
+                        }
+                    }
+
+                    RemoteAction::Inspect { name } => {
+                        tracing::debug!("inspecting container: {name}");
+                        let command = format!("docker inspect {}", shell_quote(&name));
+                        match tokio::time::timeout(
+                            Duration::from_secs(30),
+                            session.exec(&command),
+                        ).await {
+                            Ok(Ok(output)) => RemoteActionResult {
+                                title: format!("Inspect: {name}"),
+                                output: sanitize_for_tui(output),
+                                is_error: false,
+                            },
+                            Ok(Err(e)) => RemoteActionResult {
+                                title: format!("Inspect: {name}"),
+                                output: format!("{e:#}"),
+                                is_error: true,
+                            },
+                            Err(_) => RemoteActionResult {
+                                title: format!("Inspect: {name}"),
+                                output: "docker inspect timed out after 30s".to_string(),
                                 is_error: true,
                             },
                         }

@@ -95,6 +95,7 @@ Global:
 
 Container actions:
 - `r`: restart selected container
+- `Enter`: inspect selected container (`docker inspect <name>`)
 - `l`: open log viewer for selected container (last 50 lines)
 - `d`: open Docker disk usage (`docker system df`)
 
@@ -108,6 +109,7 @@ Popup controls:
 ## Web controls
 
 - `disk usage` button: runs `docker system df`
+- Per-container `inspect` button: runs `docker inspect <name>`
 - Per-container `logs` button: runs `docker logs -n 50 <name>`
 - Per-container `restart` button: runs `docker restart <name>`
 - Action output opens in a modal pane with scroll
