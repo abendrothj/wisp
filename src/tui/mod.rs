@@ -1,6 +1,6 @@
 pub mod ui;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind},
     execute,
@@ -484,21 +484,77 @@ fn open_container_shell(
 ) -> Result<()> {
     restore_terminal()?;
 
-    let command = format!("docker exec -it {} /bin/sh", shell_quote(name));
-    let mut process = match target.transport {
+    let mut first_error: Option<anyhow::Error> = None;
+    for shell in ["/bin/sh", "/bin/bash"] {
+        match run_shell_command(target, name, shell) {
+            Ok(()) => {
+                first_error = None;
+                break;
+            }
+            Err(e) => {
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+        }
+    }
+
+    setup_terminal()?;
+    terminal.clear()?;
+
+    if let Some(e) = first_error {
+        return Err(e);
+    }
+
+    Ok(())
+}
+
+fn run_shell_command(target: &ShellTarget, name: &str, shell: &str) -> Result<()> {
+    let candidates = match target.transport {
+        Transport::Tailscale => [
+            format!("docker exec -i {} {}", shell_quote(name), shell),
+            format!("docker exec {} {}", shell_quote(name), shell),
+        ]
+        .to_vec(),
+        Transport::Ssh => [
+            format!("docker exec -it {} {}", shell_quote(name), shell),
+            format!("docker exec -i {} {}", shell_quote(name), shell),
+            format!("docker exec {} {}", shell_quote(name), shell),
+        ]
+        .to_vec(),
+    };
+
+    let mut last_error: Option<anyhow::Error> = None;
+    for command in candidates {
+        match run_remote_interactive(target, &command) {
+            Ok(()) => return Ok(()),
+            Err(e) => last_error = Some(e),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("failed to launch container shell")))
+}
+
+fn run_remote_interactive(target: &ShellTarget, command: &str) -> Result<()> {
+    let status = match target.transport {
         Transport::Tailscale => {
             let mut cmd = Command::new("tailscale");
             cmd.args([
                 "ssh",
                 &format!("{}@{}", target.user, target.host),
                 "--",
-                &command,
+                command,
             ]);
-            cmd
+            cmd.stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .status()
+                .context("failed to run tailscale ssh")?
         }
         Transport::Ssh => {
             let mut cmd = Command::new("ssh");
             cmd.args([
+                "-tt",
                 "-p",
                 &target.port.to_string(),
                 "-o",
@@ -506,26 +562,25 @@ fn open_container_shell(
                 "-o",
                 "StrictHostKeyChecking=yes",
                 &format!("{}@{}", target.user, target.host),
-                &command,
+                command,
             ]);
-            cmd
+            cmd.stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .status()
+                .context("failed to run ssh")?
         }
     };
 
-    let status = process
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status();
-
-    setup_terminal()?;
-    terminal.clear()?;
-
-    match status {
-        Ok(s) if s.success() => Ok(()),
-        Ok(s) => anyhow::bail!("shell command exited with status {s}"),
-        Err(e) => Err(e.into()),
+    if status.success() {
+        return Ok(());
     }
+
+    anyhow::bail!(
+        "remote shell command failed: `{}` (status: {})",
+        command,
+        status
+    )
 }
 
 fn shell_quote(value: &str) -> String {
