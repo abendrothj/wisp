@@ -278,4 +278,4 @@ git push origin v1.0.0
 
 ## License
 
-Add your project license here (for example: MIT).
+MIT
