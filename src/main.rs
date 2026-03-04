@@ -98,6 +98,15 @@ struct Resolved {
     transport: ssh::Transport,
 }
 
+struct PollLoopConfig {
+    host: String,
+    port: u16,
+    user: String,
+    transport: ssh::Transport,
+    docker_interval: Duration,
+    azure_cfg: Option<azure::AzureConfig>,
+}
+
 impl Resolved {
     fn build(args: &Args, file: Option<Config>) -> Result<Self> {
         let file = file.unwrap_or_default();
@@ -122,7 +131,7 @@ impl Resolved {
         let azure = if args.azure_subscription_id.is_some() {
             args_azure_config(args)
         } else {
-            file.azure_config()
+            file.azure_config().or_else(azure::AzureConfig::from_env)
         };
 
         Ok(Self { host, port, user, interval, web_port, azure, transport })
@@ -185,25 +194,20 @@ async fn main() -> Result<()> {
 
     // ── polling task ──────────────────────────────────────────────────────────
     {
-        let host = cfg.host.clone();
-        let user = cfg.user.clone();
-        let transport = cfg.transport;
-        let (port, interval, azure) = (cfg.port, cfg.interval, cfg.azure.clone());
+        let poll_cfg = PollLoopConfig {
+            host: cfg.host.clone(),
+            port: cfg.port,
+            user: cfg.user.clone(),
+            transport: cfg.transport,
+            docker_interval: cfg.interval,
+            azure_cfg: cfg.azure.clone(),
+        };
         let tx = snap_tx.clone();
         tokio::spawn(async move {
             // restart_rx is consumed on first successful connection.
             // After a crash + reconnect the channel is gone — the stale banner
             // in the TUI signals to the user that a reconnect is in progress.
-            let _ = poll_loop(
-                &host,
-                port,
-                &user,
-                transport,
-                interval,
-                &azure,
-                &tx,
-                action_rx,
-            ).await
+            let _ = poll_loop(poll_cfg, tx, action_rx).await
                 .map_err(|e| error!("poll_loop exited: {e:#}"));
         });
     }
@@ -239,36 +243,36 @@ async fn main() -> Result<()> {
 }
 
 async fn poll_loop(
-    host: &str,
-    port: u16,
-    user: &str,
-    transport: ssh::Transport,
-    docker_interval: Duration,
-    azure_cfg: &Option<azure::AzureConfig>,
-    tx: &watch::Sender<Option<telemetry::Snapshot>>,
+    cfg: PollLoopConfig,
+    tx: watch::Sender<Option<telemetry::Snapshot>>,
     mut action_rx: mpsc::Receiver<RemoteActionRequest>,
 ) -> Result<()> {
-    let mut session = ssh::RemoteSession::connect(host, port, user, transport).await?;
+    let mut session = ssh::RemoteSession::connect(
+        &cfg.host,
+        cfg.port,
+        &cfg.user,
+        cfg.transport,
+    ).await?;
     let http = reqwest::Client::new();
 
-    let mut azure_token: Option<String> = if azure_cfg.is_some() {
+    let mut azure_token: Option<String> = if cfg.azure_cfg.is_some() {
         azure::access_token().await.map_err(|e| warn!("azure token: {e:#}")).ok()
     } else {
         None
     };
     let mut current_azure: Option<azure::DbMetrics> = None;
 
-    let mut docker_tick = tokio::time::interval(docker_interval);
+    let mut docker_tick = tokio::time::interval(cfg.docker_interval);
     let mut azure_tick  = tokio::time::interval(Duration::from_secs(30));
     azure_tick.reset(); // skip first Azure tick; Docker data is priority on startup
 
     loop {
         tokio::select! {
             _ = docker_tick.tick() => {
-                let mut snap = telemetry::collect_docker(host, &mut session).await?;
+                let mut snap = telemetry::collect_docker(&cfg.host, &mut session).await?;
                 snap.azure_db = current_azure.clone();
-                snap.azure_db_name = azure_cfg.as_ref().map(|cfg| cfg.server_name.clone());
-                snap.azure_db_type = azure_cfg.as_ref().map(|cfg| match cfg.server_type {
+                snap.azure_db_name = cfg.azure_cfg.as_ref().map(|az| az.server_name.clone());
+                snap.azure_db_type = cfg.azure_cfg.as_ref().map(|az| match az.server_type {
                     azure::ServerType::MySQL => "MySQL".to_string(),
                     azure::ServerType::PostgreSQLFlexible => "PostgreSQL Flexible".to_string(),
                 });
@@ -278,10 +282,10 @@ async fn poll_loop(
             }
 
             _ = azure_tick.tick() => {
-                if let (Some(cfg), Some(token)) = (azure_cfg, &azure_token) {
+                if let (Some(az_cfg), Some(token)) = (cfg.azure_cfg.as_ref(), &azure_token) {
                     match tokio::time::timeout(
                         Duration::from_secs(10),
-                        azure::fetch(cfg, &http, token),
+                        azure::fetch(az_cfg, &http, token),
                     ).await {
                         Ok(Ok(m))  => current_azure = Some(m),
                         Ok(Err(e)) => {

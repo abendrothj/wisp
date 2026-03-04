@@ -1,10 +1,28 @@
 # wisp
 
+Author: Jake Abendroth
+
 Tailscale-native, agentless infrastructure control plane.
 
 `wisp` defaults to Tailscale SSH (recommended), polls Docker + optional Azure DB telemetry, and renders:
 - a local TUI dashboard
 - a local web dashboard (`http://127.0.0.1:8080` by default)
+
+## Inspiration
+
+This project started with a very specific, very real problem:
+
+"I want container management and telemetry, but I do **not** want to babysit another heavyweight control-plane app just to click Restart."
+
+Portainer is powerful, but for this environment it felt like bringing a cruise ship to cross a puddle.
+
+So `wisp` is the opposite philosophy:
+- no agent to install
+- no always-on management stack to maintain
+- no giant UI framework tax
+- just direct, secure control over the boxes you already run
+
+In short: less dashboard theater, more useful buttons.
 
 ## What it shows
 

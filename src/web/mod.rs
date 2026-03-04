@@ -3,7 +3,7 @@ pub mod ws;
 use axum::{
     Json, Router,
     extract::State,
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -53,48 +53,93 @@ struct ActionResponse {
 
 async fn restart_handler(
     State(state): State<WebState>,
+    headers: HeaderMap,
     Json(req): Json<NameActionRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    if !is_authorized_action_request(&headers) {
+        return unauthorized_action_response();
+    }
     run_action(state.action_tx.clone(), RemoteAction::Restart { name: req.name }).await
 }
 
 async fn start_handler(
     State(state): State<WebState>,
+    headers: HeaderMap,
     Json(req): Json<NameActionRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    if !is_authorized_action_request(&headers) {
+        return unauthorized_action_response();
+    }
     run_action(state.action_tx.clone(), RemoteAction::Start { name: req.name }).await
 }
 
 async fn stop_handler(
     State(state): State<WebState>,
+    headers: HeaderMap,
     Json(req): Json<NameActionRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    if !is_authorized_action_request(&headers) {
+        return unauthorized_action_response();
+    }
     run_action(state.action_tx.clone(), RemoteAction::Stop { name: req.name }).await
 }
 
 async fn logs_handler(
     State(state): State<WebState>,
+    headers: HeaderMap,
     Json(req): Json<NameActionRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    if !is_authorized_action_request(&headers) {
+        return unauthorized_action_response();
+    }
     run_action(state.action_tx.clone(), RemoteAction::Logs { name: req.name }).await
 }
 
 async fn inspect_handler(
     State(state): State<WebState>,
+    headers: HeaderMap,
     Json(req): Json<NameActionRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    if !is_authorized_action_request(&headers) {
+        return unauthorized_action_response();
+    }
     run_action(state.action_tx.clone(), RemoteAction::Inspect { name: req.name }).await
 }
 
-async fn system_df_handler(State(state): State<WebState>) -> impl IntoResponse {
+async fn system_df_handler(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    if !is_authorized_action_request(&headers) {
+        return unauthorized_action_response();
+    }
     run_action(state.action_tx.clone(), RemoteAction::SystemDf).await
 }
 
-async fn prune_handler(State(state): State<WebState>) -> impl IntoResponse {
+async fn prune_handler(State(state): State<WebState>, headers: HeaderMap) -> Response {
+    if !is_authorized_action_request(&headers) {
+        return unauthorized_action_response();
+    }
     run_action(state.action_tx.clone(), RemoteAction::Prune).await
 }
 
-async fn run_action(action_tx: mpsc::Sender<RemoteActionRequest>, action: RemoteAction) -> impl IntoResponse {
+fn is_authorized_action_request(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-wisp-action")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+fn unauthorized_action_response() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ActionResponse {
+            title: "Action blocked".to_string(),
+            output: "missing or invalid x-wisp-action header".to_string(),
+            is_error: true,
+        }),
+    ).into_response()
+}
+
+async fn run_action(action_tx: mpsc::Sender<RemoteActionRequest>, action: RemoteAction) -> Response {
     let (tx, rx) = oneshot::channel::<RemoteActionResult>();
     let request = RemoteActionRequest { action, respond_to: tx };
 
@@ -106,7 +151,7 @@ async fn run_action(action_tx: mpsc::Sender<RemoteActionRequest>, action: Remote
                 output: "background action worker is not available".to_string(),
                 is_error: true,
             }),
-        );
+        ).into_response();
     }
 
     match tokio::time::timeout(Duration::from_secs(35), rx).await {
@@ -123,7 +168,7 @@ async fn run_action(action_tx: mpsc::Sender<RemoteActionRequest>, action: Remote
                     output: result.output,
                     is_error: result.is_error,
                 }),
-            )
+            ).into_response()
         }
         Ok(Err(_)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -132,7 +177,7 @@ async fn run_action(action_tx: mpsc::Sender<RemoteActionRequest>, action: Remote
                 output: "action result channel closed".to_string(),
                 is_error: true,
             }),
-        ),
+        ).into_response(),
         Err(_) => (
             StatusCode::REQUEST_TIMEOUT,
             Json(ActionResponse {
@@ -140,7 +185,7 @@ async fn run_action(action_tx: mpsc::Sender<RemoteActionRequest>, action: Remote
                 output: "remote command timed out".to_string(),
                 is_error: true,
             }),
-        ),
+        ).into_response(),
     }
 }
 

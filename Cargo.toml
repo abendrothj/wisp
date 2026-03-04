@@ -3,12 +3,10 @@ name = "wisp"
 version = "0.1.0"
 edition = "2024"
 description = "Tailscale-native, agentless infrastructure control plane"
+authors = ["Jake Abendroth"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-russh = "0.57"
-# russh vendors a forked ssh-key under this package name; must match exactly
-ssh-key = { version = "=0.6.16", package = "internal-russh-forked-ssh-key" }
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

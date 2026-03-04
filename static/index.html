@@ -364,7 +364,10 @@
       try {
         const res = await fetch(url, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Wisp-Action': '1',
+          },
           body: payload ? JSON.stringify(payload) : undefined,
         });
         const data = await res.json();

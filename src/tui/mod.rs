@@ -72,10 +72,9 @@ impl App {
 
     fn ingest(&mut self, snap: Snapshot) {
         self.row_count = snap.containers.len();
-        if let Some(i) = self.table_state.selected() {
-            if i >= self.row_count && self.row_count > 0 {
-                self.table_state.select(Some(self.row_count - 1));
-            }
+        if let Some(i) = self.table_state.selected()
+            && i >= self.row_count && self.row_count > 0 {
+            self.table_state.select(Some(self.row_count - 1));
         }
         self.snapshot = Some(snap);
         self.last_updated = Some(Instant::now());
@@ -156,10 +155,9 @@ fn run_loop(
 
     loop {
         // Consume latest snapshot.
-        if rx.has_changed().unwrap_or(false) {
-            if let Some(snap) = rx.borrow_and_update().clone() {
-                app.ingest(snap);
-            }
+        if rx.has_changed().unwrap_or(false)
+            && let Some(snap) = rx.borrow_and_update().clone() {
+            app.ingest(snap);
         }
 
         // Clear expired pending action messages (show for 8 s).
@@ -503,6 +501,10 @@ fn open_container_shell(
             cmd.args([
                 "-p",
                 &target.port.to_string(),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "StrictHostKeyChecking=yes",
                 &format!("{}@{}", target.user, target.host),
                 &command,
             ]);

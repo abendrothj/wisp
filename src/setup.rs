@@ -48,10 +48,9 @@ pub async fn run(host: Option<&str>) -> Result<()> {
     });
 
     // Preserve or set host section if provided
-    if let Some(h) = host {
-        if config.host.address.is_empty() {
-            config.host.address = h.to_string();
-        }
+    if let Some(h) = host
+        && config.host.address.is_empty() {
+        config.host.address = h.to_string();
     }
 
     let path = config.save_global().context("failed to write config")?;
