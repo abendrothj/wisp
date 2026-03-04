@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 /// One entry from `docker ps --format "{{json .}}"`.
 /// Docker uses PascalCase field names in its JSON output.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct ContainerInfo {
     #[serde(rename = "Names")]
     pub names: String,
@@ -29,7 +29,7 @@ pub struct ContainerInfo {
 /// One entry from `docker stats --no-stream --format "{{json .}}"`.
 /// CPU/mem/net values arrive as strings ("0.12%", "123MiB / 1GiB", etc.)
 /// and will be parsed for display in the TUI (Phase 3).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct ContainerStats {
     #[serde(rename = "Name")]
     pub name: String,

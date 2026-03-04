@@ -1,8 +1,11 @@
 use anyhow::{Context, Result, bail};
 use russh::{client, client::AuthResult, ChannelMsg};
 use ssh_key::PublicKey;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tracing::info;
+
+const EXEC_TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct TailscaleHandler;
 
@@ -13,8 +16,6 @@ impl client::Handler for TailscaleHandler {
         &mut self,
         _server_public_key: &PublicKey,
     ) -> Result<bool, Self::Error> {
-        // TOFU within Tailscale mesh — identity is validated by Tailscale ACLs.
-        // Phase 5 will add per-host key pinning in config.
         Ok(true)
     }
 }
@@ -25,14 +26,18 @@ pub struct TailscaleSession {
 }
 
 impl TailscaleSession {
-    /// Connect to `host:port` and authenticate as `user` via Tailscale `none` auth.
     pub async fn connect(host: &str, port: u16, user: &str) -> Result<Self> {
         info!("connecting to {}:{} as '{}'", host, port, user);
 
         let config = Arc::new(client::Config::default());
-        let mut handle = client::connect(config, (host, port), TailscaleHandler)
-            .await
-            .with_context(|| format!("failed to connect to {}:{}", host, port))?;
+
+        let mut handle = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            client::connect(config, (host, port), TailscaleHandler),
+        )
+        .await
+        .context("connection timed out")?
+        .with_context(|| format!("failed to connect to {}:{}", host, port))?;
 
         match handle
             .authenticate_none(user)
@@ -45,8 +50,7 @@ impl TailscaleSession {
             AuthResult::Failure { remaining_methods, .. } => {
                 bail!(
                     "authentication rejected (remaining methods: {:?}). \
-                     Ensure `tailscale ssh` is enabled on the remote host and your \
-                     ACL policy allows this identity.",
+                     Ensure `tailscale ssh` is enabled and your ACL allows this identity.",
                     remaining_methods
                 );
             }
@@ -55,9 +59,15 @@ impl TailscaleSession {
         Ok(Self { handle })
     }
 
-    /// Execute a command and return its stdout as a `String`.
-    /// Propagates remote exit codes as errors.
+    /// Execute a remote command and return its stdout.
+    /// Times out after 30 s so a dropped Tailscale link doesn't hang the poll loop.
     pub async fn exec(&mut self, command: &str) -> Result<String> {
+        tokio::time::timeout(EXEC_TIMEOUT, self.exec_inner(command))
+            .await
+            .with_context(|| format!("SSH exec timed out: `{command}`"))?
+    }
+
+    async fn exec_inner(&mut self, command: &str) -> Result<String> {
         let mut channel = self.handle.channel_open_session().await?;
         channel.exec(true, command.as_bytes()).await?;
 
@@ -65,9 +75,7 @@ impl TailscaleSession {
         let mut exit_code = 0u32;
 
         loop {
-            let Some(msg) = channel.wait().await else {
-                break;
-            };
+            let Some(msg) = channel.wait().await else { break };
             match msg {
                 ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
                 ChannelMsg::ExitStatus { exit_status } => exit_code = exit_status,

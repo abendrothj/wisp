@@ -1,27 +1,28 @@
+pub mod azure;
 pub mod docker;
 
 use anyhow::Result;
-use docker::{ContainerInfo, ContainerStats};
+use serde::Serialize;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::info;
 
 use crate::ssh::TailscaleSession;
 
 /// A point-in-time snapshot of all telemetry from a single host.
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Snapshot {
-    #[allow(dead_code)] // used by Phase 4 web UI
     pub host: String,
-    pub containers: Vec<ContainerInfo>,
-    pub stats: Vec<ContainerStats>,
+    pub containers: Vec<docker::ContainerInfo>,
+    pub stats: Vec<docker::ContainerStats>,
+    pub azure_db: Option<azure::DbMetrics>,
+    /// Seconds since UNIX epoch — used by the web frontend for "refreshed N ago".
+    pub collected_at: u64,
 }
 
-/// Collect a full telemetry snapshot from `session`.
-/// Runs `docker ps` and `docker stats` in sequence over the same SSH session.
-pub async fn collect(host: &str, session: &mut TailscaleSession) -> Result<Snapshot> {
+/// Collect Docker telemetry over `session`. Azure is polled separately in main.
+pub async fn collect_docker(host: &str, session: &mut TailscaleSession) -> Result<Snapshot> {
     info!("collecting docker ps");
-    let ps_raw = session
-        .exec(r#"docker ps --format "{{json .}}""#)
-        .await?;
+    let ps_raw = session.exec(r#"docker ps --format "{{json .}}""#).await?;
     let containers = docker::parse_ps(&ps_raw)?;
 
     info!("collecting docker stats");
@@ -34,5 +35,10 @@ pub async fn collect(host: &str, session: &mut TailscaleSession) -> Result<Snaps
         host: host.to_string(),
         containers,
         stats,
+        azure_db: None,
+        collected_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
     })
 }

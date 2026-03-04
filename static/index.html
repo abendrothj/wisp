@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>wisp</title>
+  <style>
+    :root {
+      --bg:      #0d1117;
+      --surface: #161b22;
+      --border:  #30363d;
+      --text:    #e6edf3;
+      --muted:   #8b949e;
+      --green:   #3fb950;
+      --yellow:  #d29922;
+      --red:     #f85149;
+      --blue:    #58a6ff;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', ui-monospace, monospace;
+      font-size: 13px;
+      min-height: 100vh;
+    }
+
+    /* ── header ── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 20px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+    }
+    .logo { color: var(--blue); font-weight: 700; font-size: 15px; letter-spacing: 0.05em; }
+    .header-right { display: flex; align-items: center; gap: 16px; color: var(--muted); font-size: 12px; }
+    .dot {
+      display: inline-block; width: 8px; height: 8px;
+      border-radius: 50%; background: var(--muted);
+      transition: background 0.3s;
+    }
+    .dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); }
+    .dot.dead { background: var(--red); }
+
+    /* ── layout ── */
+    main {
+      padding: 20px;
+      display: grid;
+      grid-template-columns: 1fr 260px;
+      gap: 16px;
+      align-items: start;
+    }
+    @media (max-width: 700px) { main { grid-template-columns: 1fr; } }
+
+    /* ── cards ── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .card-title {
+      padding: 8px 14px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+    }
+
+    /* ── container table ── */
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 7px 14px; text-align: left; white-space: nowrap; }
+    th {
+      font-size: 11px; font-weight: normal;
+      text-transform: uppercase; letter-spacing: 0.05em;
+      color: var(--muted); border-bottom: 1px solid var(--border);
+    }
+    tr:not(:last-child) td { border-bottom: 1px solid rgba(48,54,61,0.6); }
+    tbody tr:hover td { background: rgba(255,255,255,0.025); }
+    td.name { font-weight: 600; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
+    .running { color: var(--green); }
+    .stopped { color: var(--red); }
+    .cpu-ok   { color: var(--green); }
+    .cpu-warn { color: var(--yellow); }
+    .cpu-hot  { color: var(--red); font-weight: 700; }
+    .healthy  { color: var(--green); }
+    .unhealthy{ color: var(--red); }
+
+    /* ── azure panel ── */
+    .metric {
+      padding: 10px 14px;
+      display: flex; justify-content: space-between; align-items: flex-start;
+    }
+    .metric:not(:last-child) { border-bottom: 1px solid rgba(48,54,61,0.6); }
+    .metric-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 5px; }
+    .metric-val { font-weight: 700; font-size: 15px; }
+    .bar { width: 80px; height: 3px; background: var(--border); border-radius: 2px; margin-top: 6px; overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 2px; transition: width 0.6s ease; }
+
+    .placeholder { padding: 20px 14px; color: var(--muted); text-align: center; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <span class="logo">wisp</span>
+      <span id="host" style="color:var(--muted);margin-left:12px"></span>
+    </div>
+    <div class="header-right">
+      <span id="refresh"></span>
+      <span class="dot dead" id="dot"></span>
+    </div>
+  </header>
+
+  <main>
+    <div class="card">
+      <div class="card-title">containers</div>
+      <div id="containers"><div class="placeholder">waiting for data…</div></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">azure db</div>
+      <div id="azure"><div class="placeholder">not configured</div></div>
+    </div>
+  </main>
+
+  <script>
+    const dot     = document.getElementById('dot');
+    const hostEl  = document.getElementById('host');
+    const refresh = document.getElementById('refresh');
+
+    let lastSecs = null;
+    setInterval(() => {
+      if (lastSecs !== null) {
+        const age = Math.floor(Date.now() / 1000) - lastSecs;
+        refresh.textContent = age < 60 ? `${age}s ago` : `${Math.floor(age/60)}m ago`;
+      }
+    }, 1000);
+
+    function connect() {
+      const ws = new WebSocket(`ws://${location.host}/ws`);
+
+      ws.onopen = () => {
+        dot.className = 'dot live';
+      };
+      ws.onclose = () => {
+        dot.className = 'dot dead';
+        refresh.textContent = 'reconnecting…';
+        setTimeout(connect, 3000);
+      };
+      ws.onmessage = e => render(JSON.parse(e.data));
+    }
+
+    function cpuClass(s) {
+      const n = parseFloat(s);
+      if (n >= 20) return 'cpu-hot';
+      if (n >= 5)  return 'cpu-warn';
+      return 'cpu-ok';
+    }
+
+    function barColor(pct) {
+      if (pct >= 80) return 'var(--red)';
+      if (pct >= 50) return 'var(--yellow)';
+      return 'var(--green)';
+    }
+
+    function render(snap) {
+      hostEl.textContent = snap.host;
+      lastSecs = snap.collected_at;
+
+      /* containers */
+      const statsIdx = {};
+      (snap.stats || []).forEach(s => { statsIdx[s.Name] = s; });
+
+      if (!snap.containers || snap.containers.length === 0) {
+        document.getElementById('containers').innerHTML = '<div class="placeholder">no containers found</div>';
+      } else {
+        let rows = '';
+        for (const c of snap.containers) {
+          const s    = statsIdx[c.Names] || {};
+          const cpu  = s.CPUPerc  || '–';
+          const mem  = s.MemUsage || '–';
+          const sc   = c.State === 'running' ? 'running' : 'stopped';
+          const stc  = c.Status.includes('unhealthy') ? 'unhealthy'
+                     : c.Status.includes('healthy')   ? 'healthy' : '';
+          rows += `<tr>
+            <td class="name">${c.Names}</td>
+            <td class="${sc}">${c.State}</td>
+            <td class="${cpuClass(cpu)}">${cpu}</td>
+            <td>${mem}</td>
+            <td class="${stc}">${c.Status}</td>
+          </tr>`;
+        }
+        document.getElementById('containers').innerHTML =
+          `<table><thead><tr>
+            <th>Container</th><th>State</th><th>CPU%</th><th>Mem</th><th>Status</th>
+          </tr></thead><tbody>${rows}</tbody></table>`;
+      }
+
+      /* azure */
+      if (!snap.azure_db) return;
+      const db = snap.azure_db;
+      const metrics = [
+        { label: 'CPU',         val: db.cpu_percent,     unit: '%' },
+        { label: 'Memory',      val: db.memory_percent,  unit: '%' },
+        { label: 'Storage',     val: db.storage_percent, unit: '%' },
+        { label: 'Connections', val: db.connections,     unit: ''  },
+      ];
+      let html = '';
+      for (const m of metrics) {
+        const isPct  = m.unit === '%';
+        const disp   = isPct ? `${m.val.toFixed(1)}%` : m.val.toFixed(0);
+        const color  = isPct ? barColor(m.val) : 'var(--text)';
+        html += `<div class="metric">
+          <div>
+            <div class="metric-label">${m.label}</div>
+            ${isPct ? `<div class="bar"><div class="bar-fill" style="width:${m.val}%;background:${color}"></div></div>` : ''}
+          </div>
+          <div class="metric-val" style="color:${color}">${disp}</div>
+        </div>`;
+      }
+      document.getElementById('azure').innerHTML = html;
+    }
+
+    connect();
+  </script>
+</body>
+</html>
