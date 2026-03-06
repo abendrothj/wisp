@@ -1,4 +1,4 @@
-#![allow(dead_code)] // fields consumed in Phase 3 TUI / Phase 4 web UI
+#![allow(dead_code)]
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -22,13 +22,30 @@ pub struct ContainerInfo {
     pub status: String,
     #[serde(rename = "Ports")]
     pub ports: String,
+    /// Comma-separated `key=value` label pairs, e.g.
+    /// `"com.docker.compose.project=myapp,com.docker.compose.service=web"`
+    #[serde(rename = "Labels", default)]
+    pub labels: String,
+}
+
+impl ContainerInfo {
+    /// Extract the Docker Compose project name from container labels, if present.
+    pub fn compose_project(&self) -> Option<&str> {
+        for part in self.labels.split(',') {
+            if let Some(val) = part.trim().strip_prefix("com.docker.compose.project=") {
+                let v = val.trim();
+                if !v.is_empty() {
+                    return Some(v);
+                }
+            }
+        }
+        None
+    }
 }
 
 // ── docker stats --no-stream --format "{{json .}}" ───────────────────────────
 
 /// One entry from `docker stats --no-stream --format "{{json .}}"`.
-/// CPU/mem/net values arrive as strings ("0.12%", "123MiB / 1GiB", etc.)
-/// and will be parsed for display in the TUI (Phase 3).
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct ContainerStats {
     #[serde(rename = "Name")]

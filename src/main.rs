@@ -6,13 +6,13 @@ mod tui;
 mod web;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::time::Duration;
 use telemetry::azure;
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{error, warn};
 
-use config::Config;
+use config::{AlertsSection, Config};
 
 #[derive(Debug, Clone)]
 pub enum RemoteAction {
@@ -38,15 +38,25 @@ pub struct RemoteActionResult {
     pub is_error: bool,
 }
 
+/// Request to stream docker logs for a container.
+pub struct LogStreamRequest {
+    pub name: String,
+    /// Send the streaming receiver back to the caller.
+    pub response_tx: oneshot::Sender<mpsc::Receiver<String>>,
+}
+
 /// wisp — Tailscale-native, agentless infrastructure control plane
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<SubCommand>,
+
     /// Interactive Azure setup wizard — auto-detects resources via `az` CLI
     #[arg(long)]
     setup: bool,
 
-    /// Tailscale IP of the target host (overrides wisp.toml)
+    /// Tailscale IP of the target host (overrides config)
     #[arg(short = 'H', long)]
     host: Option<String>,
 
@@ -67,9 +77,6 @@ struct Args {
     web_port: Option<u16>,
 
     /// Use standard SSH instead of Tailscale SSH.
-    ///
-    /// Unsafe default posture for internet-facing hosts: requires open SSH ports.
-    /// Prefer Tailscale mode unless absolutely necessary.
     #[arg(long)]
     ssh: bool,
 
@@ -86,56 +93,96 @@ struct Args {
     azure_db_type: Option<String>,
 }
 
+#[derive(Subcommand, Debug)]
+enum SubCommand {
+    /// Launch with a named profile from config
+    Up {
+        /// Profile name defined under [profiles.<name>] in wisp.toml
+        profile: String,
+    },
+}
+
 // ── resolved runtime config ───────────────────────────────────────────────────
 
 struct Resolved {
-    host:     String,
-    port:     u16,
-    user:     String,
-    interval: Duration,
-    web_port: u16,
-    azure:    Option<azure::AzureConfig>,
+    host:      String,
+    port:      u16,
+    user:      String,
+    interval:  Duration,
+    web_port:  u16,
+    azure:     Option<azure::AzureConfig>,
     transport: ssh::Transport,
-    theme: config::ThemeSection,
+    theme:     config::ThemeSection,
+    alerts:    AlertsSection,
 }
 
 struct PollLoopConfig {
-    host: String,
-    port: u16,
-    user: String,
-    transport: ssh::Transport,
+    host:            String,
+    port:            u16,
+    user:            String,
+    transport:       ssh::Transport,
     docker_interval: Duration,
-    azure_cfg: Option<azure::AzureConfig>,
+    azure_cfg:       Option<azure::AzureConfig>,
 }
 
 impl Resolved {
-    fn build(args: &Args, file: Option<Config>) -> Result<Self> {
+    fn build(
+        args: &Args,
+        file: Option<Config>,
+        profile: Option<&config::Profile>,
+    ) -> Result<Self> {
         let file = file.unwrap_or_default();
 
+        // Resolution order: CLI flag > profile > global config > default
         let host = args.host.clone()
+            .or_else(|| profile.map(|p| p.address.clone()).filter(|s| !s.is_empty()))
             .or_else(|| Some(file.host.address.clone()).filter(|s| !s.is_empty()))
             .context(
-                "no host specified — pass -H <tailscale-ip> or run `wisp --setup` to write a config file",
+                "no host specified — pass -H <tailscale-ip>, use `wisp up <profile>`, \
+                 or run `wisp --setup` to write a config file",
             )?;
 
-        let port     = args.port.unwrap_or(file.host.port);
-        let user     = args.user.clone().unwrap_or_else(|| file.host.user.clone());
-        let interval = Duration::from_secs(args.interval.unwrap_or(file.host.interval));
-        let web_port = args.web_port.unwrap_or(file.web.port);
+        let port = args.port
+            .or_else(|| profile.and_then(|p| p.port))
+            .unwrap_or(file.host.port);
+
+        let user = args.user.clone()
+            .or_else(|| profile.and_then(|p| p.user.clone()))
+            .unwrap_or_else(|| file.host.user.clone());
+
+        let interval = Duration::from_secs(
+            args.interval
+                .or_else(|| profile.and_then(|p| p.interval))
+                .unwrap_or(file.host.interval),
+        );
+
+        let web_port = args.web_port
+            .or_else(|| profile.and_then(|p| p.web_port))
+            .unwrap_or(file.web.port);
+
         let transport = if args.ssh {
             ssh::Transport::Ssh
         } else {
-            file.host.transport()
+            profile.and_then(|p| p.transport())
+                .unwrap_or_else(|| file.host.transport())
         };
 
-        // CLI Azure args take priority over config file
         let azure = if args.azure_subscription_id.is_some() {
             args_azure_config(args)
         } else {
-            file.azure_config().or_else(azure::AzureConfig::from_env)
+            profile.and_then(|p| p.azure_config())
+                .or_else(|| file.azure_config())
+                .or_else(azure::AzureConfig::from_env)
         };
 
-        Ok(Self { host, port, user, interval, web_port, azure, transport, theme: file.theme })
+        let theme = profile.and_then(|p| p.theme.clone())
+            .unwrap_or(file.theme);
+
+        let alerts = profile.and_then(|p| p.alerts.clone())
+            .or_else(|| file.alerts.clone())
+            .unwrap_or_default();
+
+        Ok(Self { host, port, user, interval, web_port, azure, transport, theme, alerts })
     }
 }
 
@@ -175,7 +222,75 @@ async fn main() -> Result<()> {
     }
 
     let file_config = Config::load();
-    let cfg = Resolved::build(&args, file_config)?;
+
+    // ── profile resolution ────────────────────────────────────────────────────
+    //
+    // Priority:
+    //   1. `wisp up <profile>`  — explicit subcommand
+    //   2. `-H <host>`          — bare host flag, skip picker
+    //   3. Single profile       — auto-selected silently
+    //   4. Multiple profiles    — interactive TUI picker
+    //   5. No profiles / no host → Resolved::build will surface a clear error
+    let profile: Option<config::Profile> = match &args.command {
+        Some(SubCommand::Up { profile: name }) => {
+            let cfg = file_config.as_ref()
+                .context("no config file found — run `wisp --setup` or create wisp.toml")?;
+            let p = cfg.get_profile(name)
+                .with_context(|| format!("profile '{name}' not found in config"))?;
+            Some(p.clone())
+        }
+        None if args.host.is_none() => {
+            // Collect available profiles (sorted alphabetically for stable order).
+            let mut profiles: Vec<(String, config::Profile)> = file_config
+                .as_ref()
+                .map(|c| {
+                    let mut v: Vec<_> = c.profiles.iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    v.sort_by(|a, b| a.0.cmp(&b.0));
+                    v
+                })
+                .unwrap_or_default();
+
+            match profiles.len() {
+                0 => {
+                    // No profiles and no host — show the onboarding screen then exit.
+                    if file_config.is_none() || file_config.as_ref().map(|c| c.host.address.is_empty()).unwrap_or(true) {
+                        let theme_cfg = file_config.as_ref()
+                            .map(|c| c.theme.clone())
+                            .unwrap_or_default();
+                        tokio::task::block_in_place(|| tui::picker::run_welcome(&theme_cfg))?;
+                        return Ok(());
+                    }
+                    None // has a [host] section — fall through to flag-based resolution
+                }
+                1 => {
+                    // Single profile: auto-select without showing the picker.
+                    Some(profiles.remove(0).1)
+                }
+                _ => {
+                    // Multiple profiles: show the interactive picker.
+                    let theme_cfg = file_config.as_ref()
+                        .map(|c| c.theme.clone())
+                        .unwrap_or_default();
+
+                    let selected = tokio::task::block_in_place(|| {
+                        tui::picker::run(&profiles, &theme_cfg)
+                    })?;
+
+                    match selected {
+                        None => return Ok(()), // user quit
+                        Some(name) => profiles.into_iter()
+                            .find(|(k, _)| k == &name)
+                            .map(|(_, p)| p),
+                    }
+                }
+            }
+        }
+        None => None,
+    };
+
+    let cfg = Resolved::build(&args, file_config, profile.as_ref())?;
 
     if cfg.transport == ssh::Transport::Ssh {
         eprintln!(
@@ -192,23 +307,21 @@ async fn main() -> Result<()> {
 
     let (snap_tx, snap_rx)     = watch::channel::<Option<telemetry::Snapshot>>(None);
     let (action_tx, action_rx) = mpsc::channel::<RemoteActionRequest>(16);
+    let (stream_tx, stream_rx) = mpsc::channel::<LogStreamRequest>(4);
 
     // ── polling task ──────────────────────────────────────────────────────────
     {
         let poll_cfg = PollLoopConfig {
-            host: cfg.host.clone(),
-            port: cfg.port,
-            user: cfg.user.clone(),
-            transport: cfg.transport,
+            host:            cfg.host.clone(),
+            port:            cfg.port,
+            user:            cfg.user.clone(),
+            transport:       cfg.transport,
             docker_interval: cfg.interval,
-            azure_cfg: cfg.azure.clone(),
+            azure_cfg:       cfg.azure.clone(),
         };
         let tx = snap_tx.clone();
         tokio::spawn(async move {
-            // restart_rx is consumed on first successful connection.
-            // After a crash + reconnect the channel is gone — the stale banner
-            // in the TUI signals to the user that a reconnect is in progress.
-            let _ = poll_loop(poll_cfg, tx, action_rx).await
+            let _ = poll_loop(poll_cfg, tx, action_rx, stream_rx).await
                 .map_err(|e| error!("poll_loop exited: {e:#}"));
         });
     }
@@ -219,7 +332,7 @@ async fn main() -> Result<()> {
             snapshot_rx: snap_rx.clone(),
             action_tx: action_tx.clone(),
         };
-        let port  = cfg.web_port;
+        let port = cfg.web_port;
         tokio::spawn(async move {
             let addr = format!("127.0.0.1:{port}");
             tracing::info!("web dashboard → http://{addr}");
@@ -231,7 +344,17 @@ async fn main() -> Result<()> {
     }
 
     // ── TUI (blocks; tokio keeps polling + web tasks alive) ──────────────────
-    tokio::task::block_in_place(|| tui::run(&cfg.host, snap_rx, action_tx, cfg.theme.clone()))?;
+    tokio::task::block_in_place(|| {
+        tui::run(
+            &cfg.host,
+            snap_rx,
+            action_tx,
+            stream_tx,
+            cfg.theme.clone(),
+            cfg.alerts.clone(),
+            cfg.web_port,
+        )
+    })?;
 
     Ok(())
 }
@@ -240,6 +363,7 @@ async fn poll_loop(
     cfg: PollLoopConfig,
     tx: watch::Sender<Option<telemetry::Snapshot>>,
     mut action_rx: mpsc::Receiver<RemoteActionRequest>,
+    mut stream_rx: mpsc::Receiver<LogStreamRequest>,
 ) -> Result<()> {
     let mut session = ssh::RemoteSession::connect(
         &cfg.host,
@@ -258,7 +382,7 @@ async fn poll_loop(
 
     let mut docker_tick = tokio::time::interval(cfg.docker_interval);
     let mut azure_tick  = tokio::time::interval(Duration::from_secs(30));
-    azure_tick.reset(); // skip first Azure tick; Docker data is priority on startup
+    azure_tick.reset();
 
     loop {
         tokio::select! {
@@ -271,7 +395,7 @@ async fn poll_loop(
                     azure::ServerType::PostgreSQLFlexible => "PostgreSQL Flexible".to_string(),
                 });
                 if tx.send(Some(snap)).is_err() {
-                    return Ok(()); // all receivers dropped — clean exit
+                    return Ok(());
                 }
             }
 
@@ -291,198 +415,112 @@ async fn poll_loop(
                 }
             }
 
+            Some(req) = stream_rx.recv() => {
+                let cmd = format!("docker logs -f --tail 200 {}", shell_quote(&req.name));
+                match session.exec_streaming(&cmd).await {
+                    Ok(chunk_rx) => { let _ = req.response_tx.send(chunk_rx); }
+                    Err(e) => warn!("log stream failed for {}: {e:#}", req.name),
+                }
+            }
+
             Some(request) = action_rx.recv() => {
-                let result = match request.action {
-                    RemoteAction::Start { name } => {
-                        tracing::debug!("starting container: {name}");
-                        match tokio::time::timeout(
-                            Duration::from_secs(30),
-                            session.exec(&format!("docker start {}", shell_quote(&name))),
-                        ).await {
-                            Ok(Ok(output)) => RemoteActionResult {
-                                title: format!("Start: {name}"),
-                                output: if output.trim().is_empty() {
-                                    format!("{name} started")
-                                } else {
-                                    sanitize_for_tui(output)
-                                },
-                                is_error: false,
-                            },
-                            Ok(Err(e)) => RemoteActionResult {
-                                title: format!("Start: {name}"),
-                                output: format!("{e:#}"),
-                                is_error: true,
-                            },
-                            Err(_) => RemoteActionResult {
-                                title: format!("Start: {name}"),
-                                output: "start timed out after 30s".to_string(),
-                                is_error: true,
-                            },
-                        }
-                    }
-
-                    RemoteAction::Stop { name } => {
-                        tracing::debug!("stopping container: {name}");
-                        match tokio::time::timeout(
-                            Duration::from_secs(30),
-                            session.exec(&format!("docker stop {}", shell_quote(&name))),
-                        ).await {
-                            Ok(Ok(output)) => RemoteActionResult {
-                                title: format!("Stop: {name}"),
-                                output: if output.trim().is_empty() {
-                                    format!("{name} stopped")
-                                } else {
-                                    sanitize_for_tui(output)
-                                },
-                                is_error: false,
-                            },
-                            Ok(Err(e)) => RemoteActionResult {
-                                title: format!("Stop: {name}"),
-                                output: format!("{e:#}"),
-                                is_error: true,
-                            },
-                            Err(_) => RemoteActionResult {
-                                title: format!("Stop: {name}"),
-                                output: "stop timed out after 30s".to_string(),
-                                is_error: true,
-                            },
-                        }
-                    }
-
-                    RemoteAction::Restart { name } => {
-                        tracing::debug!("restarting container: {name}");
-                        match tokio::time::timeout(
-                            Duration::from_secs(30),
-                            session.exec(&format!("docker restart {}", shell_quote(&name))),
-                        ).await {
-                            Ok(Ok(output)) => RemoteActionResult {
-                                title: format!("Restart: {name}"),
-                                output: if output.trim().is_empty() {
-                                    format!("{name} restarted")
-                                } else {
-                                    sanitize_for_tui(output)
-                                },
-                                is_error: false,
-                            },
-                            Ok(Err(e)) => RemoteActionResult {
-                                title: format!("Restart: {name}"),
-                                output: format!("{e:#}"),
-                                is_error: true,
-                            },
-                            Err(_) => RemoteActionResult {
-                                title: format!("Restart: {name}"),
-                                output: "restart timed out after 30s".to_string(),
-                                is_error: true,
-                            },
-                        }
-                    }
-
-                    RemoteAction::Logs { name } => {
-                        tracing::debug!("fetching logs for container: {name}");
-                        let command = format!("docker logs -n 50 {}", shell_quote(&name));
-                        match tokio::time::timeout(
-                            Duration::from_secs(30),
-                            session.exec(&command),
-                        ).await {
-                            Ok(Ok(output)) => RemoteActionResult {
-                                title: format!("Logs: {name} (last 50 lines)"),
-                                output: if output.trim().is_empty() {
-                                    "no log output returned".to_string()
-                                } else {
-                                    sanitize_for_tui(output)
-                                },
-                                is_error: false,
-                            },
-                            Ok(Err(e)) => RemoteActionResult {
-                                title: format!("Logs: {name}"),
-                                output: format!("{e:#}"),
-                                is_error: true,
-                            },
-                            Err(_) => RemoteActionResult {
-                                title: format!("Logs: {name}"),
-                                output: "log fetch timed out after 30s".to_string(),
-                                is_error: true,
-                            },
-                        }
-                    }
-
-                    RemoteAction::Inspect { name } => {
-                        tracing::debug!("inspecting container: {name}");
-                        let command = format!("docker inspect {}", shell_quote(&name));
-                        match tokio::time::timeout(
-                            Duration::from_secs(30),
-                            session.exec(&command),
-                        ).await {
-                            Ok(Ok(output)) => RemoteActionResult {
-                                title: format!("Inspect: {name}"),
-                                output: sanitize_for_tui(output),
-                                is_error: false,
-                            },
-                            Ok(Err(e)) => RemoteActionResult {
-                                title: format!("Inspect: {name}"),
-                                output: format!("{e:#}"),
-                                is_error: true,
-                            },
-                            Err(_) => RemoteActionResult {
-                                title: format!("Inspect: {name}"),
-                                output: "docker inspect timed out after 30s".to_string(),
-                                is_error: true,
-                            },
-                        }
-                    }
-
-                    RemoteAction::SystemDf => {
-                        tracing::debug!("fetching docker disk usage");
-                        match tokio::time::timeout(
-                            Duration::from_secs(20),
-                            session.exec("docker system df"),
-                        ).await {
-                            Ok(Ok(output)) => RemoteActionResult {
-                                title: "Docker Disk Usage".to_string(),
-                                output: sanitize_for_tui(output),
-                                is_error: false,
-                            },
-                            Ok(Err(e)) => RemoteActionResult {
-                                title: "Docker Disk Usage".to_string(),
-                                output: format!("{e:#}"),
-                                is_error: true,
-                            },
-                            Err(_) => RemoteActionResult {
-                                title: "Docker Disk Usage".to_string(),
-                                output: "docker system df timed out after 20s".to_string(),
-                                is_error: true,
-                            },
-                        }
-                    }
-
-                    RemoteAction::Prune => {
-                        tracing::debug!("pruning stopped containers");
-                        match tokio::time::timeout(
-                            Duration::from_secs(45),
-                            session.exec("docker container prune -f"),
-                        ).await {
-                            Ok(Ok(output)) => RemoteActionResult {
-                                title: "Prune: stopped containers".to_string(),
-                                output: sanitize_for_tui(output),
-                                is_error: false,
-                            },
-                            Ok(Err(e)) => RemoteActionResult {
-                                title: "Prune: stopped containers".to_string(),
-                                output: format!("{e:#}"),
-                                is_error: true,
-                            },
-                            Err(_) => RemoteActionResult {
-                                title: "Prune: stopped containers".to_string(),
-                                output: "docker container prune timed out after 45s".to_string(),
-                                is_error: true,
-                            },
-                        }
-                    }
-                };
-
+                let result = dispatch_action(&mut session, request.action).await;
                 let _ = request.respond_to.send(result);
             }
         }
+    }
+}
+
+async fn dispatch_action(session: &mut ssh::RemoteSession, action: RemoteAction) -> RemoteActionResult {
+    match action {
+        RemoteAction::Start { name } => {
+            tracing::debug!("starting container: {name}");
+            timed_exec(session, &format!("docker start {}", shell_quote(&name)), 30,
+                format!("Start: {name}"),
+                Some(format!("{name} started")),
+            ).await
+        }
+
+        RemoteAction::Stop { name } => {
+            tracing::debug!("stopping container: {name}");
+            timed_exec(session, &format!("docker stop {}", shell_quote(&name)), 30,
+                format!("Stop: {name}"),
+                Some(format!("{name} stopped")),
+            ).await
+        }
+
+        RemoteAction::Restart { name } => {
+            tracing::debug!("restarting container: {name}");
+            timed_exec(session, &format!("docker restart {}", shell_quote(&name)), 30,
+                format!("Restart: {name}"),
+                Some(format!("{name} restarted")),
+            ).await
+        }
+
+        RemoteAction::Logs { name } => {
+            tracing::debug!("fetching logs for container: {name}");
+            timed_exec(session, &format!("docker logs -n 50 {}", shell_quote(&name)), 30,
+                format!("Logs: {name} (last 50 lines)"),
+                None,
+            ).await
+        }
+
+        RemoteAction::Inspect { name } => {
+            tracing::debug!("inspecting container: {name}");
+            timed_exec(session, &format!("docker inspect {}", shell_quote(&name)), 30,
+                format!("Inspect: {name}"),
+                None,
+            ).await
+        }
+
+        RemoteAction::SystemDf => {
+            tracing::debug!("fetching docker disk usage");
+            timed_exec(session, "docker system df", 20,
+                "Docker Disk Usage".to_string(),
+                None,
+            ).await
+        }
+
+        RemoteAction::Prune => {
+            tracing::debug!("pruning stopped containers");
+            timed_exec(session, "docker container prune -f", 45,
+                "Prune: stopped containers".to_string(),
+                None,
+            ).await
+        }
+    }
+}
+
+async fn timed_exec(
+    session: &mut ssh::RemoteSession,
+    command: &str,
+    timeout_secs: u64,
+    title: String,
+    empty_ok: Option<String>,
+) -> RemoteActionResult {
+    match tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        session.exec(command),
+    ).await {
+        Ok(Ok(output)) => RemoteActionResult {
+            title,
+            output: if output.trim().is_empty() {
+                empty_ok.unwrap_or_else(|| "no output".to_string())
+            } else {
+                sanitize_for_tui(output)
+            },
+            is_error: false,
+        },
+        Ok(Err(e)) => RemoteActionResult {
+            title,
+            output: format!("{e:#}"),
+            is_error: true,
+        },
+        Err(_) => RemoteActionResult {
+            title,
+            output: format!("command timed out after {timeout_secs}s"),
+            is_error: true,
+        },
     }
 }
 
